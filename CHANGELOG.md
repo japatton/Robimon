@@ -4,6 +4,26 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.4.0-touch-D] — 2026-04-26
+
+### Added
+- `ui/gestures` module — state-machine gesture detector that consumes raw
+  touch points and emits TAP / LONG_PRESS / SWIPE_LEFT / SWIPE_RIGHT
+  (DOUBLE_TAP reserved for the voice mode in stage F). Tunable thresholds:
+  long-press 1.2 s with 50 px motion tolerance, tap < 350 ms with 40 px
+  drift, swipe ≥ 50 px horizontal motion. Generous on motion because
+  fingertips on a round AMOLED naturally drift a few pixels.
+- Radial expression menu: tap the face to open 8 cyan-ringed buttons
+  (happy / yay / wow / huh / angry / sad / sleep / think) arranged
+  clockwise from 12 o'clock. Tap an item to apply, tap outside to dismiss,
+  5 s timeout for auto-dismiss.
+- Brief on-screen text flashes confirm long-press (`settings`) and swipes
+  (`<` / `>`) until the screen-manager and settings UI ship in stage E.
+
+### Changed
+- Demo cycle off by default in `main.cpp`; touch now drives expressions.
+  Demo stays available via `face::enable_demo_cycle(true)`.
+
 ## [0.3.0-face-C] — 2026-04-26
 
 ### Added

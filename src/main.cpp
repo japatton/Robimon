@@ -25,6 +25,7 @@
 #include "hal/imu.h"
 #include "hal/audio.h"
 #include "face/face.h"
+#include "ui/gestures.h"
 #include "app/log.h"
 #include "app/stats.h"
 
@@ -55,10 +56,11 @@ void setup() {
   if (!robimon::hal::audio::begin())   LOG_W(TAG, "audio not ready");
 
   robimon::face::begin();
-  // Demo-cycle through expressions so the renderer can be verified visually
-  // before the radial menu UI lands. Disable in stage D when touch picks them.
-  robimon::face::enable_demo_cycle(true);
+  // Stage D: touch drives expressions. Demo cycle off by default; the user
+  // can re-enable via face::enable_demo_cycle(true) for visual checks.
+  robimon::face::enable_demo_cycle(false);
 
+  robimon::ui::gestures::begin();
   robimon::stats::begin();
 
 #if defined(ROBIMON_BOOT_TEST_TONE) && (ROBIMON_BOOT_TEST_TONE == 1)
@@ -72,9 +74,34 @@ void setup() {
 }
 
 void loop() {
-  // Touch is read but not yet wired to anything; placeholder for stage D.
-  robimon::hal::touch::Point pts[1];
-  (void)robimon::hal::touch::read(pts, 1);
+  // Read touch and feed it to the gesture detector. Routes events to face.
+  robimon::hal::touch::Point hw_pts[1];
+  const int n = robimon::hal::touch::read(hw_pts, 1);
+  robimon::ui::gestures::Point gp{ n > 0 ? hw_pts[0].x : (int16_t)0,
+                                    n > 0 ? hw_pts[0].y : (int16_t)0 };
+  const auto event = robimon::ui::gestures::update(n, gp);
+  switch (event) {
+    case robimon::ui::gestures::Event::TAP: {
+      const auto pt = robimon::ui::gestures::last_event_point();
+      robimon::face::on_tap(pt.x, pt.y);
+      break;
+    }
+    case robimon::ui::gestures::Event::LONG_PRESS:
+      // Long-press will open the PIN-locked settings menu (stage E).
+      LOG_I(TAG, "long-press detected");
+      robimon::face::flash_text("settings");
+      break;
+    case robimon::ui::gestures::Event::SWIPE_LEFT:
+      LOG_I(TAG, "swipe left");
+      robimon::face::flash_text("<");
+      break;
+    case robimon::ui::gestures::Event::SWIPE_RIGHT:
+      LOG_I(TAG, "swipe right");
+      robimon::face::flash_text(">");
+      break;
+    default:
+      break;
+  }
 
   robimon::face::update();
   robimon::stats::note_frame();

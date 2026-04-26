@@ -224,6 +224,41 @@ const char* name_of(Expression e) {
 }
 
 // =============================================================================
+// Radial menu
+// =============================================================================
+// 8 expressions arranged around a circle. Center of the menu is the canvas
+// center; items orbit at MENU_RADIUS. Tap on an item → set that expression
+// and dismiss. Tap outside / no tap for MENU_TIMEOUT_MS → dismiss without
+// changing.
+struct MenuItem {
+  Expression  expr;
+  const char* label;
+};
+// Short labels so they read at TextSize 3 (18×24 px chars) within a circular
+// menu button. Up to 6 chars max keeps each label under ~108 px wide.
+constexpr MenuItem MENU_ITEMS[] = {
+  { Expression::HAPPY,     "happy"  },
+  { Expression::EXCITED,   "yay"    },
+  { Expression::SURPRISED, "wow"    },
+  { Expression::CONFUSED,  "huh"    },
+  { Expression::ANGRY,     "angry"  },
+  { Expression::SAD,       "sad"    },
+  { Expression::SLEEPY,    "sleep"  },
+  { Expression::THINKING,  "think"  },
+};
+constexpr int MENU_COUNT     = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
+constexpr int MENU_RADIUS    = 125;     // px from canvas center to item centers
+constexpr int MENU_ITEM_R    = 50;      // hit-test radius around item center (generous)
+constexpr uint32_t MENU_TIMEOUT_MS = 5000;
+
+enum class FaceMode : uint8_t { IDLE, MENU, FLASH };
+
+// Brief on-screen flash for confirming gestures that don't yet have a
+// destination UI (long-press → settings; swipe → screen change). Pure visual
+// "we saw your gesture" feedback; goes away after FLASH_MS.
+constexpr uint32_t FLASH_MS = 350;
+
+// =============================================================================
 // State
 // =============================================================================
 FaceParams  s_from{};
@@ -238,6 +273,11 @@ uint32_t    s_blink_start_ms = 0;
 bool        s_demo_on = false;
 uint32_t    s_demo_next_ms = 0;
 uint8_t     s_demo_idx = 0;
+
+FaceMode    s_mode = FaceMode::IDLE;
+uint32_t    s_menu_open_ms = 0;
+uint32_t    s_flash_start_ms = 0;
+const char* s_flash_text = "";
 
 // =============================================================================
 // Helpers
@@ -343,10 +383,52 @@ void draw_mouth(const MouthDef* m) {
   draw_bitmap_centered(MOUTH_CX, s_mouth_cy, m->cols, m->rows, m->row_bits, COLOR_MOUTH);
 }
 
-void render(const FaceParams& p) {
+// Compute the panel-space center of a menu item by index.
+// Items are placed around the canvas center; we convert to panel coords by
+// adding the canvas-vs-panel y offset for the caller.
+void menu_item_center_canvas(int idx, int* out_cx, int* out_cy) {
   Arduino_GFX* g = robimon::hal::display::gfx();
-  if (!g) return;
+  const int center_x = g->width()  / 2;
+  const int center_y = g->height() / 2;
+  // Start at top (-90°) so the first item sits "12 o'clock"; sweep clockwise.
+  const float angle = -1.5707963f + (2.0f * 3.14159265f * idx / MENU_COUNT);
+  *out_cx = center_x + (int)(MENU_RADIUS * cosf(angle));
+  *out_cy = center_y + (int)(MENU_RADIUS * sinf(angle));
+}
 
+void draw_menu() {
+  Arduino_GFX* g = robimon::hal::display::gfx();
+  g->fillScreen(COLOR_BG);
+
+  const int center_x = g->width()  / 2;
+  const int center_y = g->height() / 2;
+
+  // Center hint at TextSize 2 (12×16 px chars).
+  g->setTextColor(COLOR_EYE);
+  g->setTextSize(2);
+  g->setCursor(center_x - 24, center_y - 8);
+  g->print("pick");
+
+  // Items: outline ring + centered label at TextSize 3 (18×24 px chars).
+  for (int i = 0; i < MENU_COUNT; ++i) {
+    int cx, cy;
+    menu_item_center_canvas(i, &cx, &cy);
+    // Subtle ring outline (2 px stroke) — frames the hit target without
+    // dominating visually now that the labels are large.
+    g->drawCircle(cx, cy,     MENU_ITEM_R,     COLOR_EYE);
+    g->drawCircle(cx, cy,     MENU_ITEM_R - 1, COLOR_EYE);
+
+    g->setTextColor(COLOR_EYE);
+    g->setTextSize(3);
+    const char* lbl = MENU_ITEMS[i].label;
+    const int text_w = (int)strlen(lbl) * 18;   // 18 px per char at size 3
+    g->setCursor(cx - text_w / 2, cy - 12);
+    g->print(lbl);
+  }
+}
+
+void render_face(const FaceParams& p) {
+  Arduino_GFX* g = robimon::hal::display::gfx();
   g->fillScreen(COLOR_BG);
 
   const int wl = (int)(EYE_W_BASE * p.left.scale);
@@ -362,6 +444,28 @@ void render(const FaceParams& p) {
                      p.right.bot_lid_outer, p.right.bot_lid_inner);
 
   draw_mouth(p.mouth);
+}
+
+void draw_flash() {
+  Arduino_GFX* g = robimon::hal::display::gfx();
+  g->fillScreen(COLOR_BG);
+  g->setTextColor(COLOR_EYE);
+  g->setTextSize(4);   // 24×32 px chars
+  const int text_w = (int)strlen(s_flash_text) * 24;
+  g->setCursor(g->width() / 2 - text_w / 2, g->height() / 2 - 16);
+  g->print(s_flash_text);
+}
+
+void render(const FaceParams& p) {
+  Arduino_GFX* g = robimon::hal::display::gfx();
+  if (!g) return;
+
+  switch (s_mode) {
+    case FaceMode::MENU:  draw_menu();      break;
+    case FaceMode::FLASH: draw_flash();     break;
+    case FaceMode::IDLE:
+    default:              render_face(p);   break;
+  }
 
   robimon::hal::display::flush();
 }
@@ -443,6 +547,16 @@ void update() {
   if ((now - s_last_frame_ms) < 33) return;
   s_last_frame_ms = now;
 
+  // Auto-dismiss the menu after the timeout.
+  if (s_mode == FaceMode::MENU && (now - s_menu_open_ms) > MENU_TIMEOUT_MS) {
+    s_mode = FaceMode::IDLE;
+    LOG_I(TAG, "menu auto-dismissed");
+  }
+  // Auto-clear the gesture flash.
+  if (s_mode == FaceMode::FLASH && (now - s_flash_start_ms) > FLASH_MS) {
+    s_mode = FaceMode::IDLE;
+  }
+
   FaceParams base;
   if (s_tween_dur_ms == 0) base = s_to;
   else {
@@ -456,7 +570,7 @@ void update() {
   s_current = base;
   render(s_current);
 
-  if (s_demo_on && now >= s_demo_next_ms) {
+  if (s_demo_on && s_mode == FaceMode::IDLE && now >= s_demo_next_ms) {
     static const Expression seq[] = {
       Expression::NEUTRAL,  Expression::HAPPY,    Expression::SAD,
       Expression::SLEEPY,   Expression::SURPRISED, Expression::ANGRY,
@@ -466,6 +580,44 @@ void update() {
     set_expression(seq[s_demo_idx], 350);
     s_demo_next_ms = now + 3500;
   }
+}
+
+void on_tap(int panel_x, int panel_y) {
+  // Convert panel y to canvas-local for hit testing (canvas x already matches).
+  const int canvas_y = panel_y - robimon::hal::display::canvas_panel_y_offset();
+
+  if (s_mode == FaceMode::IDLE) {
+    s_mode = FaceMode::MENU;
+    s_menu_open_ms = millis();
+    s_demo_on = false;   // user is driving expressions now; pause demo
+    LOG_I(TAG, "menu opened");
+    return;
+  }
+
+  // Menu is open — hit-test items.
+  for (int i = 0; i < MENU_COUNT; ++i) {
+    int cx, cy;
+    menu_item_center_canvas(i, &cx, &cy);
+    const int dx = panel_x - cx;
+    const int dy = canvas_y - cy;
+    if (dx * dx + dy * dy <= MENU_ITEM_R * MENU_ITEM_R) {
+      LOG_I(TAG, "menu pick: %s", MENU_ITEMS[i].label);
+      set_expression(MENU_ITEMS[i].expr, 350);
+      s_mode = FaceMode::IDLE;
+      return;
+    }
+  }
+  // Tap outside any item → dismiss without changing.
+  s_mode = FaceMode::IDLE;
+  LOG_I(TAG, "menu dismissed (tap outside)");
+}
+
+bool menu_is_open() { return s_mode == FaceMode::MENU; }
+
+void flash_text(const char* text) {
+  s_flash_text = text ? text : "";
+  s_flash_start_ms = millis();
+  s_mode = FaceMode::FLASH;
 }
 
 void enable_demo_cycle(bool on) {

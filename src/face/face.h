@@ -45,4 +45,19 @@ void enable_demo_cycle(bool on);
 // Current expression name as a c-string (for logs).
 const char* current_name();
 
+// ---- Touch interaction (Stage D) -------------------------------------------
+// Coordinates are panel-space (0..LCD_WIDTH × 0..LCD_HEIGHT).
+
+// Forward a tap to the face. If a menu is open, hit-tests menu items; if
+// idle, opens the radial expression menu at the tap location.
+void on_tap(int panel_x, int panel_y);
+
+// True if the radial menu is currently displayed. Useful for routing other
+// gestures (swipes are ignored while the menu is open, etc.).
+bool menu_is_open();
+
+// Show a short "we saw your gesture" text flash. Used as a visual confirm
+// for long-press / swipe until the screen-manager and settings UI land.
+void flash_text(const char* text);
+
 }  // namespace robimon::face
