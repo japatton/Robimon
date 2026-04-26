@@ -26,6 +26,9 @@
 #include "hal/audio.h"
 #include "face/face.h"
 #include "ui/gestures.h"
+#include "ui/screen_mgr.h"
+#include "screens/face_screen.h"
+#include "screens/alarms_screen.h"
 #include "app/log.h"
 #include "app/stats.h"
 
@@ -61,6 +64,13 @@ void setup() {
   robimon::face::enable_demo_cycle(false);
 
   robimon::ui::gestures::begin();
+
+  // Stage E: screen manager. Face is the default screen (index 0); alarms
+  // is the second. Settings is reached via long-press + PIN, NOT swipe.
+  robimon::ui::screen_mgr::begin();
+  robimon::ui::screen_mgr::add_screen(&robimon::screens::face_screen);
+  robimon::ui::screen_mgr::add_screen(&robimon::screens::alarms_screen);
+
   robimon::stats::begin();
 
 #if defined(ROBIMON_BOOT_TEST_TONE) && (ROBIMON_BOOT_TEST_TONE == 1)
@@ -74,36 +84,39 @@ void setup() {
 }
 
 void loop() {
-  // Read touch and feed it to the gesture detector. Routes events to face.
+  // Read touch and feed it to the gesture detector. Events route through
+  // the screen manager to the active screen (or to nav, in the case of
+  // swipes).
   robimon::hal::touch::Point hw_pts[1];
   const int n = robimon::hal::touch::read(hw_pts, 1);
   robimon::ui::gestures::Point gp{ n > 0 ? hw_pts[0].x : (int16_t)0,
                                     n > 0 ? hw_pts[0].y : (int16_t)0 };
   const auto event = robimon::ui::gestures::update(n, gp);
+
   switch (event) {
     case robimon::ui::gestures::Event::TAP: {
       const auto pt = robimon::ui::gestures::last_event_point();
-      robimon::face::on_tap(pt.x, pt.y);
+      robimon::ui::screen_mgr::on_tap(pt.x, pt.y);
       break;
     }
     case robimon::ui::gestures::Event::LONG_PRESS:
-      // Long-press will open the PIN-locked settings menu (stage E).
+      // Long-press will open the PIN-locked settings menu in stage F.
       LOG_I(TAG, "long-press detected");
       robimon::face::flash_text("settings");
       break;
     case robimon::ui::gestures::Event::SWIPE_LEFT:
-      LOG_I(TAG, "swipe left");
-      robimon::face::flash_text("<");
+      // Swipes only navigate when the face's radial menu isn't open —
+      // accidental swipes during expression-picking shouldn't change screen.
+      if (!robimon::face::menu_is_open()) robimon::ui::screen_mgr::next();
       break;
     case robimon::ui::gestures::Event::SWIPE_RIGHT:
-      LOG_I(TAG, "swipe right");
-      robimon::face::flash_text(">");
+      if (!robimon::face::menu_is_open()) robimon::ui::screen_mgr::prev();
       break;
     default:
       break;
   }
 
-  robimon::face::update();
+  robimon::ui::screen_mgr::update(millis());
   robimon::stats::note_frame();
   robimon::stats::tick();
   delay(2);

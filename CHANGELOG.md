@@ -4,6 +4,31 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.5.0-screens-E] — 2026-04-26
+
+### Added
+- `ui/screen_mgr` — minimal screen manager. Holds an ordered list of
+  swipeable screens, tracks the current index, routes per-frame `update`
+  and `on_tap` to it. Snap transitions for now (no slide animation —
+  saved for later if it bothers).
+- `ui::Screen` virtual interface (update / on_tap / on_appear /
+  on_disappear / name).
+- `screens/face_screen` — thin wrapper that hosts the face module.
+- `screens/alarms_screen` — placeholder alarms list. Renders a header,
+  empty-state text, and a live "Ns on this screen" heartbeat counter at
+  10 FPS so the screen doesn't *feel* hung when there's nothing to do.
+  Real alarm rendering lands when the alarm manager ships in stage G.
+
+### Changed
+- Gestures classify on **release** instead of mid-hold. Slow swipes
+  (where the user pauses before moving) used to get preempted by
+  long-press; they now reliably register as swipes. Long-press fires
+  when the user lifts after holding ≥1.2 s.
+- 250 ms quiet window after any swipe fires. The CST92xx touch
+  controller occasionally reports n=0 mid-drag, which used to cause the
+  remainder of the swipe to land as a tap on the destination screen
+  (which then opened the radial menu unintentionally on the face).
+
 ## [0.4.0-touch-D] — 2026-04-26
 
 ### Added

@@ -20,7 +20,15 @@ bool     s_touch_active        = false;
 uint32_t s_touch_start_ms      = 0;
 Point    s_touch_start_pt      = {0, 0};
 Point    s_touch_last_pt       = {0, 0};
-bool     s_long_press_emitted  = false;
+
+// Quiet window after a swipe fires. The CST92xx touch controller occasionally
+// reports n=0 mid-drag (single-frame glitch), which makes the gesture detector
+// classify the partial drag as a swipe and the *remainder* of the drag as a
+// fresh touch — that fresh touch then lands on the new screen as a tap (and
+// pops open the radial menu). Swallowing all input for ~250 ms after a
+// swipe means the actual continuation has time to lift cleanly first.
+constexpr uint32_t POST_SWIPE_QUIET_MS = 250;
+uint32_t s_quiet_until_ms      = 0;
 
 Point    s_last_event_pt       = {0, 0};
 
@@ -28,12 +36,19 @@ Point    s_last_event_pt       = {0, 0};
 
 void begin() {
   s_touch_active = false;
-  s_long_press_emitted = false;
+  s_quiet_until_ms = 0;
 }
 
 Event update(int n_touches, Point pt) {
   const bool now_down = (n_touches > 0);
   const uint32_t now = millis();
+
+  // Quiet window after a swipe (see POST_SWIPE_QUIET_MS comment). Drop the
+  // touch state so the next post-quiet touch begins cleanly.
+  if (now < s_quiet_until_ms) {
+    s_touch_active = false;
+    return Event::NONE;
+  }
 
   // --- Touch begin ----------------------------------------------------------
   if (now_down && !s_touch_active) {
@@ -41,32 +56,21 @@ Event update(int n_touches, Point pt) {
     s_touch_start_ms = now;
     s_touch_start_pt = pt;
     s_touch_last_pt  = pt;
-    s_long_press_emitted = false;
     return Event::NONE;
   }
 
   // --- Touch held -----------------------------------------------------------
+  // Just track the latest position; we classify on release. This means a
+  // pause-then-drag is reliably a swipe instead of getting preempted by a
+  // mid-hold long-press event.
   if (now_down && s_touch_active) {
     s_touch_last_pt = pt;
-
-    // Long-press fires while the finger is still down so the UI can respond
-    // immediately (e.g., open the PIN pad). We only fire it once per touch.
-    if (!s_long_press_emitted && (now - s_touch_start_ms) > LONG_PRESS_MS) {
-      const int dx = pt.x - s_touch_start_pt.x;
-      const int dy = pt.y - s_touch_start_pt.y;
-      if (abs(dx) <= LP_MAX_MOTION_PX && abs(dy) <= LP_MAX_MOTION_PX) {
-        s_long_press_emitted = true;
-        s_last_event_pt = pt;
-        return Event::LONG_PRESS;
-      }
-    }
     return Event::NONE;
   }
 
   // --- Touch released -------------------------------------------------------
   if (!now_down && s_touch_active) {
     s_touch_active = false;
-    if (s_long_press_emitted) return Event::NONE;
 
     const uint32_t dur = now - s_touch_start_ms;
     const int dx = s_touch_last_pt.x - s_touch_start_pt.x;
@@ -74,10 +78,20 @@ Event update(int n_touches, Point pt) {
     const int abs_dx = abs(dx);
     const int abs_dy = abs(dy);
 
-    // Horizontal swipe takes priority over vertical for our left/right nav.
+    // Horizontal swipe wins over everything — if the finger moved enough,
+    // it's a swipe regardless of how long the touch lasted. Open a quiet
+    // window so the touch controller's mid-drag glitches don't get
+    // re-interpreted as a tap on the destination screen.
     if (abs_dx > SWIPE_MIN_PX && abs_dx > abs_dy) {
       s_last_event_pt = s_touch_start_pt;
+      s_quiet_until_ms = now + POST_SWIPE_QUIET_MS;
       return (dx > 0) ? Event::SWIPE_RIGHT : Event::SWIPE_LEFT;
+    }
+
+    // Long-press: held past the threshold without much drift.
+    if (dur >= LONG_PRESS_MS && abs_dx <= LP_MAX_MOTION_PX && abs_dy <= LP_MAX_MOTION_PX) {
+      s_last_event_pt = s_touch_start_pt;
+      return Event::LONG_PRESS;
     }
 
     // TAP: brief contact with very little drift.
