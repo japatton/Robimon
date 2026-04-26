@@ -35,11 +35,16 @@
 #include "screens/time_settings_screen.h"
 #include "screens/display_settings_screen.h"
 #include "screens/about_screen.h"
+#include "screens/alarms_settings_screen.h"
+#include "screens/alarm_edit_screen.h"
 #include "services/config_store.h"
 #include "services/wifi_mgr.h"
 #include "services/time_svc.h"
+#include "services/alarm_mgr.h"
 #include "app/log.h"
 #include "app/stats.h"
+
+namespace { struct AlarmFireWatcher { int last_idx = -2; } s_alarm_watcher; }
 
 namespace {
 constexpr const char* TAG = "main";
@@ -75,6 +80,9 @@ void setup() {
 
   // Time service: applies stored TZ immediately; SNTP starts after WiFi connects.
   robimon::services::time_svc::begin();
+
+  // Alarms: load saved alarms from NVS (firing happens once SNTP is synced).
+  robimon::services::alarm_mgr::begin();
 
   // Apply stored brightness preference (default level 5 = 176/255).
   {
@@ -118,26 +126,43 @@ void loop() {
                                     n > 0 ? hw_pts[0].y : (int16_t)0 };
   const auto event = robimon::ui::gestures::update(n, gp);
 
+  // While an alarm is firing, taps dismiss and swipes snooze (per spec).
+  // This routing happens BEFORE the regular screen_mgr dispatch so we can
+  // intercept gestures regardless of which screen is showing.
+  const bool alarm_firing = robimon::services::alarm_mgr::any_firing();
+
   switch (event) {
     case robimon::ui::gestures::Event::TAP: {
       const auto pt = robimon::ui::gestures::last_event_point();
-      robimon::ui::screen_mgr::on_tap(pt.x, pt.y);
+      if (alarm_firing) {
+        LOG_I(TAG, "alarm dismiss (tap)");
+        robimon::services::alarm_mgr::dismiss_current();
+      } else {
+        robimon::ui::screen_mgr::on_tap(pt.x, pt.y);
+      }
       break;
     }
     case robimon::ui::gestures::Event::LONG_PRESS:
       // Long-press opens the PIN pad if no modal is already up.
-      if (robimon::ui::screen_mgr::modal_depth() == 0) {
+      if (alarm_firing) {
+        // Treat long-press as dismiss too (more forgiving than only tap).
+        robimon::services::alarm_mgr::dismiss_current();
+      } else if (robimon::ui::screen_mgr::modal_depth() == 0) {
         LOG_I(TAG, "long-press -> PIN pad");
         robimon::ui::screen_mgr::push_modal(&robimon::screens::pin_pad_screen);
       }
       break;
     case robimon::ui::gestures::Event::SWIPE_LEFT:
-      // Swipes only navigate when the face's radial menu isn't open —
-      // accidental swipes during expression-picking shouldn't change screen.
-      if (!robimon::face::menu_is_open()) robimon::ui::screen_mgr::next();
-      break;
     case robimon::ui::gestures::Event::SWIPE_RIGHT:
-      if (!robimon::face::menu_is_open()) robimon::ui::screen_mgr::prev();
+      if (alarm_firing) {
+        LOG_I(TAG, "alarm snooze (swipe)");
+        robimon::services::alarm_mgr::snooze_current(/*minutes=*/9);
+      } else if (!robimon::face::menu_is_open()) {
+        if (event == robimon::ui::gestures::Event::SWIPE_LEFT)
+          robimon::ui::screen_mgr::next();
+        else
+          robimon::ui::screen_mgr::prev();
+      }
       break;
     default:
       break;
@@ -145,6 +170,30 @@ void loop() {
 
   robimon::services::wifi_mgr::update(millis());
   robimon::services::time_svc::update(millis());
+  robimon::services::alarm_mgr::update(millis());
+
+  // Watch for alarm firing transitions so the face overlay + alarm sound
+  // match the alarm_mgr state. Doing this in main keeps alarm_mgr free of
+  // UI/HAL deps.
+  const int firing_idx = robimon::services::alarm_mgr::current_firing_idx();
+  if (firing_idx != s_alarm_watcher.last_idx) {
+    s_alarm_watcher.last_idx = firing_idx;
+    if (firing_idx >= 0) {
+      const auto* a = robimon::services::alarm_mgr::current_firing();
+      if (a) {
+        robimon::face::set_expression((robimon::face::Expression)a->expression, 200);
+        robimon::face::set_label(a->label[0] ? a->label : "alarm");
+      }
+      // Two-tone alarm chime on a background task; loops until dismissed.
+      robimon::hal::audio::start_alarm();
+    } else {
+      // Returning to normal: stop sound, drop label, tween back to neutral.
+      robimon::hal::audio::stop_alarm();
+      robimon::face::clear_label();
+      robimon::face::set_expression(robimon::face::Expression::NEUTRAL, 350);
+    }
+  }
+
   robimon::ui::screen_mgr::update(millis());
   robimon::stats::note_frame();
   robimon::stats::tick();

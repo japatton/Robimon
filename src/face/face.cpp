@@ -279,6 +279,9 @@ uint32_t    s_menu_open_ms = 0;
 uint32_t    s_flash_start_ms = 0;
 const char* s_flash_text = "";
 
+// Persistent label overlay (e.g., alarm name). Empty string when none.
+char        s_label[28] = {0};
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -444,6 +447,15 @@ void render_face(const FaceParams& p) {
                      p.right.bot_lid_outer, p.right.bot_lid_inner);
 
   draw_mouth(p.mouth);
+
+  // Optional label overlay below the mouth (e.g., alarm name). Centered.
+  if (s_label[0]) {
+    g->setTextSize(3);
+    g->setTextColor(COLOR_EYE);
+    const int lw = (int)strlen(s_label) * 18;
+    g->setCursor(g->width() / 2 - lw / 2, s_mouth_cy + 24);
+    g->print(s_label);
+  }
 }
 
 void draw_flash() {
@@ -619,6 +631,13 @@ void flash_text(const char* text) {
   s_flash_start_ms = millis();
   s_mode = FaceMode::FLASH;
 }
+
+void set_label(const char* text) {
+  if (!text) { s_label[0] = '\0'; return; }
+  strncpy(s_label, text, sizeof(s_label) - 1);
+  s_label[sizeof(s_label) - 1] = '\0';
+}
+void clear_label() { s_label[0] = '\0'; }
 
 void enable_demo_cycle(bool on) {
   s_demo_on = on;

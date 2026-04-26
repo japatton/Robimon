@@ -4,6 +4,41 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.9.0-alarms-G] — 2026-04-26
+
+### Added
+- `services/alarm_mgr` — up to 8 alarms, persisted as a binary blob in
+  NVS. Each alarm: enabled, hour, minute, days_mask (Sun=bit0..Sat=bit6,
+  0 means every day), expression index, label. update() checks the
+  wall clock once per second; fires once per (yday, minute) so no
+  double-fires within the same minute. Snooze defers re-fire by N
+  minutes; auto-dismiss after 5 min per spec.
+- `screens/alarms_settings_screen` — list view with `+ add` and tap-to-
+  edit row entries.
+- `screens/alarm_edit_screen` — time picker (− / + for hour and
+  minute), 7-day toggle row, expression cycler (< / >), enabled
+  toggle, save / delete / cancel.
+- Face module gains a `set_label`/`clear_label` overlay rendered below
+  the mouth — used by the alarm-firing UI to show the alarm's label.
+- `audio::start_alarm` / `audio::stop_alarm` — repeating two-tone
+  chime (600 Hz → 880 Hz, ~800 ms cadence) on a background task pinned
+  to core 0 so the UI on core 1 stays responsive. Loops until dismiss
+  or auto-dismiss; gracefully unmutes the NS4150B amp before tones and
+  re-mutes on stop to avoid pops.
+
+### Changed
+- `alarms` tile in settings menu now pushes the alarms list (previously
+  stub-only).
+- main.cpp watches alarm_mgr firing transitions: on rising edge it
+  sets the configured face expression, sets the label overlay, and
+  starts the chime; on falling edge it stops the chime, clears the
+  label, and tweens back to neutral. Tap dismisses, swipe snoozes
+  (9 min) — these intercept the normal carousel/menu routing only
+  while an alarm is firing.
+- Default ES8311 boot volume bumped 30 → 55 % (still under the 70 %
+  spec cap) so alarms and the test tone are audible without being
+  startling.
+
 ## [0.8.0-time-F3] — 2026-04-26
 
 ### Added

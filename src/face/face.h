@@ -60,4 +60,9 @@ bool menu_is_open();
 // for long-press / swipe until the screen-manager and settings UI land.
 void flash_text(const char* text);
 
+// Persistent label overlay rendered below the eyes/mouth. Used by the alarm
+// firing flow (e.g., set_label("test alarm")). Pass nullptr to clear.
+void set_label(const char* text);
+void clear_label();
+
 }  // namespace robimon::face

@@ -9,6 +9,9 @@ extern "C" {
 #include <Arduino.h>
 #include <ESP_I2S.h>
 #include <math.h>
+#include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 namespace robimon::hal::audio {
 
@@ -20,6 +23,11 @@ es8311_handle_t s_codec      = nullptr;
 uint32_t        s_sample_rate = DEFAULT_SAMPLE_RATE;
 bool            s_ok          = false;
 bool            s_amp_on      = false;
+
+// ---- Alarm playback state -------------------------------------------------
+TaskHandle_t        s_alarm_task = nullptr;
+std::atomic<bool>   s_alarm_stop{false};
+std::atomic<bool>   s_alarm_running{false};
 
 esp_err_t init_codec(uint32_t sample_rate) {
   // ES8311 lives on Wire (I2C port 0). The es8311 driver uses the low-level
@@ -48,11 +56,10 @@ esp_err_t init_codec(uint32_t sample_rate) {
   if (r != ESP_OK) return r;
   es8311_microphone_gain_set(s_codec, ES8311_MIC_GAIN_18DB);
 
-  // Start at low volume — the project spec says voice playback is capped at
-  // ~70 %, but boot-time we don't know what's about to play. 30 % is a kid-safe
-  // floor; set_volume_percent() ramps it up as the app needs.
+  // Boot at a moderate volume so alarms and the test tone are audible without
+  // being startling. Stays below the project's 70 % spec cap.
   int actually_set = 0;
-  es8311_voice_volume_set(s_codec, 30, &actually_set);
+  es8311_voice_volume_set(s_codec, 55, &actually_set);
 
   return ESP_OK;
 }
@@ -137,6 +144,97 @@ size_t capture(int16_t* samples, size_t max_count) {
   }
   return got;
 }
+
+// Generates one tone (sine wave w/ short fade in/out) into the supplied
+// buffer. Returns the number of samples written.
+size_t generate_tone(int16_t* buf, uint32_t freq_hz, uint32_t ms, float amplitude) {
+  if (!buf) return 0;
+  const size_t samples = (size_t)((uint64_t)s_sample_rate * ms / 1000UL);
+  const float dt = 1.0f / (float)s_sample_rate;
+  const size_t fade = (size_t)((uint64_t)s_sample_rate * 8 / 1000UL);
+  for (size_t i = 0; i < samples; ++i) {
+    const float t = (float)i * dt;
+    float env = 1.0f;
+    if (i < fade)               env = (float)i / (float)fade;
+    if (i >= samples - fade)    env = (float)(samples - i) / (float)fade;
+    buf[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freq_hz * t)
+                       * 32767.0f * amplitude * env);
+  }
+  return samples;
+}
+
+// Background task: pre-computes a low+high two-tone chime and loops it
+// until s_alarm_stop is set. Pinned to core 0 so it doesn't compete with
+// the UI/render loop on core 1.
+void alarm_task(void*) {
+  constexpr uint32_t LO_HZ   = 600;
+  constexpr uint32_t HI_HZ   = 880;
+  constexpr uint32_t TONE_MS = 180;
+  constexpr uint32_t MID_GAP_MS  = 40;     // silence between the two tones
+  constexpr uint32_t REST_MS     = 380;    // silence between repetitions
+  constexpr float    AMPLITUDE   = 0.55f;
+
+  const size_t lo_samples = (size_t)((uint64_t)s_sample_rate * TONE_MS / 1000UL);
+  const size_t hi_samples = lo_samples;
+  int16_t* lo_buf = (int16_t*)malloc(lo_samples * sizeof(int16_t));
+  int16_t* hi_buf = (int16_t*)malloc(hi_samples * sizeof(int16_t));
+  if (!lo_buf || !hi_buf) {
+    if (lo_buf) free(lo_buf);
+    if (hi_buf) free(hi_buf);
+    s_alarm_running = false;
+    s_alarm_task = nullptr;
+    vTaskDelete(NULL);
+    return;
+  }
+  generate_tone(lo_buf, LO_HZ, TONE_MS, AMPLITUDE);
+  generate_tone(hi_buf, HI_HZ, TONE_MS, AMPLITUDE);
+
+  enable_amp(true);
+  vTaskDelay(pdMS_TO_TICKS(8));   // let the amp settle so the first sample doesn't pop
+
+  while (!s_alarm_stop.load()) {
+    play(lo_buf, lo_samples);
+    if (s_alarm_stop.load()) break;
+    vTaskDelay(pdMS_TO_TICKS(MID_GAP_MS));
+    if (s_alarm_stop.load()) break;
+    play(hi_buf, hi_samples);
+    if (s_alarm_stop.load()) break;
+    // Rest period — broken into small slices so we can react to stop quickly.
+    for (uint32_t waited = 0; waited < REST_MS && !s_alarm_stop.load(); waited += 30) {
+      vTaskDelay(pdMS_TO_TICKS(30));
+    }
+  }
+
+  enable_amp(false);
+  free(lo_buf);
+  free(hi_buf);
+  s_alarm_running = false;
+  s_alarm_task = nullptr;
+  vTaskDelete(NULL);
+}
+
+void start_alarm() {
+  if (!s_ok) return;
+  if (s_alarm_running.load()) return;       // already playing
+  s_alarm_stop = false;
+  s_alarm_running = true;
+  // Pin to core 0 so the I2S blocking writes don't compete with the UI on
+  // core 1. Stack 4 KB is plenty (we just call play() in a loop).
+  xTaskCreatePinnedToCore(alarm_task, "alarm_audio", 4096, nullptr,
+                           /*priority=*/1, &s_alarm_task, /*core=*/0);
+}
+
+void stop_alarm() {
+  if (!s_alarm_running.load()) return;
+  s_alarm_stop = true;
+  // Brief join — task should self-terminate within ~1 s (worst case waiting
+  // for the current play() to drain).
+  for (int i = 0; i < 200 && s_alarm_running.load(); ++i) {
+    delay(10);
+  }
+}
+
+bool alarm_is_playing() { return s_alarm_running.load(); }
 
 void play_test_tone() {
   if (!s_ok) return;

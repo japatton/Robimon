@@ -39,6 +39,14 @@ size_t capture(int16_t* samples, size_t max_count);
 // confirmation. Blocks for ~120 ms.
 void play_test_tone();
 
+// Alarm sound — repeating two-tone chime that loops on a background task
+// pinned to core 0 so the UI on core 1 stays responsive. start_alarm() is
+// idempotent (no-op if the alarm is already playing); stop_alarm() returns
+// once the playback task has cleaned up.
+void start_alarm();
+void stop_alarm();
+bool alarm_is_playing();
+
 bool ok();
 
 }  // namespace robimon::hal::audio
