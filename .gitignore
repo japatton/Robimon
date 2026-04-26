@@ -1,0 +1,22 @@
+# PlatformIO build output
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+.cache/
+
+# Compiled assets / generated headers
+src/assets_generated/
+
+# Local-only configuration
+.env
+.env.local
+secrets.h
+
+# Editor cruft
+*.swp
+*.swo
+.DS_Store
+
+# Claude Code per-project memory (local-only, not source-controlled)
+memory/
