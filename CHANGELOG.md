@@ -4,6 +4,46 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.6.0-settings-F1] — 2026-04-26
+
+### Added
+- `services/config_store` — NVS Preferences wrapper. Stores PIN as a
+  HMAC-SHA256(salt, pin) hash with a per-device random salt; the PIN
+  itself is never persisted. On a fresh device, `pin_check()` returns
+  true for the default `0000` so the first-run flow can let an adult in.
+- Modal stack on top of `ui/screen_mgr`. Settings, PIN, and future
+  sub-screens push/pop modals; while a modal is on the stack, swipes
+  are ignored (no carousel nav under a modal) and on_tap goes to the
+  topmost modal.
+- `screens/pin_pad_screen` — modal 4-digit PIN entry. 3×4 number grid
+  with backspace and cancel; max 3 wrong tries before auto-dismiss.
+  PIN-correct pops itself and pushes the settings menu.
+- `screens/settings_menu_screen` — top-level settings menu with eight
+  section tiles (`wifi`, `ha`, `voice`, `alarms`, `display`, `time`,
+  `PIN`, `about`) and a `back` button. Sections are stubs for now;
+  they get wired up in F-2..F-4.
+- Long-press on the face/alarms screens now opens the PIN pad as a
+  modal instead of just flashing "settings".
+
+### Changed
+- Gesture detector restructured to a 3-state machine (IDLE / ACTIVE /
+  RELEASING). Brief touch-controller dropouts (<40 ms) are debounced as
+  flutter rather than treated as a release, so a long swipe through
+  several flutters now accumulates motion correctly instead of getting
+  fragmented into many sub-threshold non-events.
+- TAP and LONG_PRESS get the same 200 ms post-event quiet window the
+  swipe already had. Fixes the "press one digit, three register" bug
+  caused by the controller flashing n=0 mid-press.
+
+### Notes
+- `[E][TouchPoints.cpp:68] getPoint(): Invalid touch point index: 0`
+  in the serial log is a SensorLib internal bug —
+  `TouchDrvCST92xx::getTouchPoints()` calls `getPoint(0).event`
+  unconditionally to read the event byte, even when zero points were
+  reported. The driver clears its state on the error so it's
+  cosmetic; fixing requires a SensorLib patch (or a wrapper that
+  swallows the log).
+
 ## [0.5.0-screens-E] — 2026-04-26
 
 ### Added

@@ -1,9 +1,8 @@
-// Screen manager — holds an ordered list of screens, tracks the current one,
-// and routes input + per-frame updates to it. Stage E uses snap transitions
-// (no slide animation yet) — swipe left/right just changes the active index.
-//
-// Settings is intentionally NOT a screen in this rotation; it's reached via
-// long-press + PIN and lives outside the swipe path.
+// Screen manager — holds an ordered list of swipeable screens AND a small
+// modal stack that lives on top of them. Settings, PIN entry, etc. push
+// onto the modal stack and block swipes; popping all modals returns to the
+// underlying carousel. Snap transitions for the carousel (slide animation
+// can land later if it bothers).
 
 #pragma once
 
@@ -47,12 +46,20 @@ void set_index(int idx);
 
 int  index();
 int  count();
-Screen* current();
+Screen* current();   // top of modal stack if any, else carousel current
+
+// ---- Modal stack ----------------------------------------------------------
+// Modal screens live on top of the carousel. While at least one modal is
+// pushed, swipes are ignored (no carousel nav) and on_tap goes to the top
+// modal. Pushing/popping triggers on_appear/on_disappear like normal.
+void push_modal(Screen* s);
+void pop_modal();
+int  modal_depth();
 
 // Per-frame entry point — called from main.cpp::loop().
 void update(uint32_t now_ms);
 
-// Forward a tap to the current screen.
+// Forward a tap to the current screen (modal top if any, else carousel).
 void on_tap(int panel_x, int panel_y);
 
 }  // namespace screen_mgr

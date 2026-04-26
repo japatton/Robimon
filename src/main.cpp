@@ -29,6 +29,9 @@
 #include "ui/screen_mgr.h"
 #include "screens/face_screen.h"
 #include "screens/alarms_screen.h"
+#include "screens/pin_pad_screen.h"
+#include "screens/settings_menu_screen.h"
+#include "services/config_store.h"
 #include "app/log.h"
 #include "app/stats.h"
 
@@ -57,6 +60,7 @@ void setup() {
   if (!robimon::hal::touch::begin())   LOG_W(TAG, "touch not ready");
   if (!robimon::hal::imu::begin())     LOG_W(TAG, "IMU not ready");
   if (!robimon::hal::audio::begin())   LOG_W(TAG, "audio not ready");
+  if (!robimon::services::config::begin()) LOG_W(TAG, "config store not ready");
 
   robimon::face::begin();
   // Stage D: touch drives expressions. Demo cycle off by default; the user
@@ -100,9 +104,11 @@ void loop() {
       break;
     }
     case robimon::ui::gestures::Event::LONG_PRESS:
-      // Long-press will open the PIN-locked settings menu in stage F.
-      LOG_I(TAG, "long-press detected");
-      robimon::face::flash_text("settings");
+      // Long-press opens the PIN pad if no modal is already up.
+      if (robimon::ui::screen_mgr::modal_depth() == 0) {
+        LOG_I(TAG, "long-press -> PIN pad");
+        robimon::ui::screen_mgr::push_modal(&robimon::screens::pin_pad_screen);
+      }
       break;
     case robimon::ui::gestures::Event::SWIPE_LEFT:
       // Swipes only navigate when the face's radial menu isn't open —
