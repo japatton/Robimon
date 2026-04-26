@@ -4,6 +4,37 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.3.0-face-C] — 2026-04-26
+
+### Added
+- `display` HAL now owns an `Arduino_Canvas` back-buffer (~298 KB in PSRAM)
+  and exposes `flush()` to push to the panel in one QSPI burst. Drawing
+  primitives never touch the panel directly anymore — kills the
+  mid-scanout tearing that the per-element direct-draw path produced.
+- QSPI clocked at 80 MHz (default in the GFX library is 40 MHz); doubled
+  effective flush bandwidth.
+- LCD TE pin (GPIO 13) configured as input, ready for vsync-gated flushes
+  once we send the CO5300 `TEON` (0x35) command — not wired yet.
+- Pixelated face renderer (`src/face/face.cpp`):
+  - Two large rounded-square ("octagon") cyan eyes with a per-eye lid
+    coverage model (`top_lid_outer`, `top_lid_inner`, `bot_lid_outer`,
+    `bot_lid_inner`) that supports asymmetric expressions like THINKING
+    and CONFUSED.
+  - Pixelated mouth with a few hand-drawn bitmaps (smile / frown / dash /
+    `O` / hmm / grimace / speak).
+  - Idle behaviors: random blink (2-6 s), subtle breathing (±2 % eye
+    scale, 4 s period).
+  - Tween between expressions (~350 ms) with cubic ease-out.
+- Demo loop cycles through 9 expressions every 3.5 s (off by default in
+  Stage D once touch picks them).
+
+### Changed
+- Eye color settled on `0x055F` (electric blue-cyan) — sci-fi desk-robot
+  look rather than near-white cyan.
+- Cell size 10 px with 1 px black gaps; 2-cell corner chamfer on each eye.
+- Performance: render ≈ 10 ms, flush ≈ 31 ms, sustained ~22-24 FPS at
+  466×320 PSRAM canvas.
+
 ## [0.2.0-hal-B] — 2026-04-26
 
 ### Added

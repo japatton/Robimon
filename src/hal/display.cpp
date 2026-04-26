@@ -4,21 +4,23 @@
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
+#include <esp_heap_caps.h>
 
 namespace robimon::hal::display {
 
 namespace {
 constexpr const char* TAG = "lcd";
 
-// Hold the typed pointer so we can call CO5300-specific methods like
-// setBrightness; expose it as Arduino_GFX* through the gfx() accessor.
-Arduino_DataBus*  s_bus = nullptr;
-Arduino_CO5300*   s_panel = nullptr;
-bool              s_te_attached = false;
+// Size of the back-buffer covering the face area. The canvas's local (0,0)
+// maps to panel (0, CANVAS_OUTPUT_Y). When you need a panel y, add this; when
+// drawing into the canvas, use canvas-local coords.
+// 320 tall accommodates eyes + mouth + cheek blushes; flush ≈ 30 ms at 80 MHz.
+constexpr int CANVAS_H        = 320;
+constexpr int CANVAS_OUTPUT_Y = (466 - CANVAS_H) / 2;   // 73
 
-// CO5300 ctor: bus, rst, rotation, w, h, col_offset1, row_offset1, col_offset2, row_offset2.
-// Last three are rotation-dependent offsets the driver applies to address-window writes.
-// Stock Waveshare example passes (6, 0, 0, 0); rotation 0 only uses col_offset1.
+Arduino_DataBus* s_bus      = nullptr;
+Arduino_CO5300*  s_panel    = nullptr;
+Arduino_Canvas*  s_canvas   = nullptr;
 }  // namespace
 
 bool begin() {
@@ -32,21 +34,41 @@ bool begin() {
       s_bus, LCD_RESET, /*rotation=*/0, LCD_WIDTH, LCD_HEIGHT,
       LCD_COL_OFFSET, 0, 0, 0);
 
-  if (!s_panel->begin()) {
-    LOG_E(TAG, "Arduino_CO5300::begin() failed");
+  // Back-buffer covering just the face band, not the full panel. The flush
+  // is the bottleneck (≈ 1 byte / 10 ns over QSPI) so a smaller canvas =
+  // higher achievable FPS. 466×280 ≈ 261 KB; flush ≈ 26 ms; theoretical max
+  // ~38 FPS. Full-screen would be 434 KB / 43 ms / 23 FPS.
+  // Top of canvas at panel y=93, so face center (panel y=233) lands at
+  // canvas-local y = 140. Bottom at panel y=373.
+  s_canvas = new Arduino_Canvas(LCD_WIDTH, /*h=*/CANVAS_H, s_panel,
+                                /*output_x=*/0, /*output_y=*/CANVAS_OUTPUT_Y);
+
+  // Canvas::begin() internally calls panel->begin(). Calling panel->begin()
+  // ourselves first would assert on the QSPI bus being already initialized.
+  // 80 MHz QSPI — CO5300 supports it; default ESP32QSPI_FREQUENCY is 40 MHz
+  // which limits us to ~12 FPS on a 466×280 buffer. Drop to 60 MHz if we
+  // ever see flush corruption (haven't observed any so far).
+  constexpr int32_t QSPI_HZ = 80 * 1000 * 1000;
+  if (!s_canvas->begin(QSPI_HZ)) {
+    LOG_E(TAG, "Arduino_Canvas::begin() failed (likely PSRAM allocation)");
     return false;
   }
 
+  // Clear the full panel once (direct write — slow, but only happens at boot).
+  // Anything outside the canvas band stays black for the rest of the session
+  // since we never push to it again.
   s_panel->fillScreen(0x0000);
+
+  s_canvas->fillScreen(0x0000);
+  s_canvas->flush();
   s_panel->setBrightness(180);
 
-  // Wire the TE pin as a plain input for now. We poll it from wait_for_te()
-  // when the caller needs vsync; later we can switch to an attachInterrupt
-  // and a notify if we want to free CPU during the wait.
+  // TE pin as plain input; flush() polls it before pushing.
   pinMode(LCD_TE, INPUT);
-  s_te_attached = true;
 
-  LOG_I(TAG, "CO5300 %dx%d up", LCD_WIDTH, LCD_HEIGHT);
+  LOG_I(TAG, "CO5300 %dx%d up; canvas in PSRAM, free PSRAM %lu",
+        LCD_WIDTH, LCD_HEIGHT,
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   return true;
 }
 
@@ -54,25 +76,21 @@ void set_brightness(uint8_t b) {
   if (s_panel) s_panel->setBrightness(b);
 }
 
-void flush(int x1, int y1, int x2, int y2, const uint16_t* px) {
-  if (!s_panel) return;
-  const int w = x2 - x1 + 1;
-  const int h = y2 - y1 + 1;
-  // LV_COLOR_16_SWAP=1 means LVGL hands us already-byte-swapped RGB565.
-  s_panel->draw16bitBeRGBBitmap(x1, y1, const_cast<uint16_t*>(px), w, h);
-}
+Arduino_GFX* gfx() { return s_canvas; }
+int width()  { return s_canvas ? s_canvas->width()  : 0; }
+int height() { return s_canvas ? s_canvas->height() : 0; }
+int canvas_panel_y_offset() { return CANVAS_OUTPUT_Y; }
 
 void wait_for_te() {
-  if (!s_te_attached) return;
-  // CO5300 TE pulses high once per frame. Spin briefly, with a microsecond
-  // sleep so we don't pin the core. Bounded so a stuck TE never deadlocks us.
+  // CO5300 TE pulses high once per refresh. Spin briefly with microsecond
+  // sleeps so we don't pin the core. Bounded so a stuck TE never deadlocks us.
   const uint32_t deadline_us = micros() + 20000;  // 20 ms ≈ 50 Hz floor
-  while (digitalRead(robimon::board::LCD_TE) == LOW && micros() < deadline_us) { delayMicroseconds(50); }
   while (digitalRead(robimon::board::LCD_TE) == HIGH && micros() < deadline_us) { delayMicroseconds(50); }
+  while (digitalRead(robimon::board::LCD_TE) == LOW  && micros() < deadline_us) { delayMicroseconds(50); }
 }
 
-Arduino_GFX* gfx() { return s_panel; }
-int width()  { return s_panel ? s_panel->width()  : 0; }
-int height() { return s_panel ? s_panel->height() : 0; }
+void flush() {
+  if (s_canvas) s_canvas->flush();
+}
 
 }  // namespace robimon::hal::display

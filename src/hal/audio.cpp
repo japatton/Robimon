@@ -141,23 +141,43 @@ size_t capture(int16_t* samples, size_t max_count) {
 void play_test_tone() {
   if (!s_ok) return;
 
-  // 600 Hz sine, 120 ms, 30 % amplitude. Soft, brief, kid-safe.
+  // 600 Hz sine, 500 ms, 70 % amplitude. Loud enough to hear clearly across
+  // the room; well below "startle a kid" loud. The codec volume is also
+  // pushed to the project max (70 %) for the duration, then restored.
   constexpr uint32_t freq_hz = 600;
-  constexpr uint32_t ms = 120;
+  constexpr uint32_t ms = 500;
+  constexpr float    amplitude = 0.70f;
+
   const size_t samples = (size_t)((uint64_t)s_sample_rate * ms / 1000UL);
   int16_t* buf = (int16_t*)malloc(samples * sizeof(int16_t));
   if (!buf) return;
+
   const float dt = 1.0f / (float)s_sample_rate;
+  // Linear ramp in/out over the first/last 8 ms suppresses the click at
+  // the edges (the "step" from 0 to full amplitude pops the speaker).
+  const size_t fade = (size_t)((uint64_t)s_sample_rate * 8 / 1000UL);
   for (size_t i = 0; i < samples; ++i) {
     const float t = (float)i * dt;
-    buf[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freq_hz * t) * 32767.0f * 0.30f);
+    float env = 1.0f;
+    if (i < fade)               env = (float)i / (float)fade;
+    if (i >= samples - fade)    env = (float)(samples - i) / (float)fade;
+    buf[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freq_hz * t)
+                       * 32767.0f * amplitude * env);
   }
 
+  // Save and bump codec volume for the test, then restore.
+  int saved_vol = 0;
+  es8311_voice_volume_get(s_codec, &saved_vol);
+  int set_to = 0;
+  es8311_voice_volume_set(s_codec, MAX_VOLUME_PERCENT, &set_to);
+
   enable_amp(true);
-  delay(5);             // let the amp settle before pushing samples → less popping
+  delay(10);            // let the amp settle before pushing samples → less popping
   play(buf, samples);
-  delay(20);            // drain the I2S DMA before muting the amp
+  delay(40);            // drain the I2S DMA before muting the amp
   enable_amp(false);
+
+  es8311_voice_volume_set(s_codec, saved_vol, &set_to);
   free(buf);
 }
 

@@ -13,9 +13,6 @@
 //   7. Touch (CST9217)
 //   8. IMU (QMI8658)
 //   9. Audio (ES8311 codec + I2S + PA)
-//
-// Set ROBIMON_BOOT_TEST_TONE=1 in build_flags to play a 120 ms beep at end
-// of setup as a quick audio bring-up confirmation.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -27,39 +24,12 @@
 #include "hal/touch.h"
 #include "hal/imu.h"
 #include "hal/audio.h"
+#include "face/face.h"
 #include "app/log.h"
 #include "app/stats.h"
 
-#include <Arduino_GFX_Library.h>
-
 namespace {
 constexpr const char* TAG = "main";
-
-void draw_boot_face(Arduino_GFX* g) {
-  using namespace robimon::board;
-  constexpr int CX = LCD_WIDTH / 2;
-  constexpr int CY = LCD_HEIGHT / 2;
-
-  g->fillScreen(0x0000);
-
-  const int eye_offset = 70;
-  const int eye_radius = 48;
-  const int pupil_radius = 18;
-
-  g->fillCircle(CX - eye_offset, CY - 20, eye_radius, 0xFFFF);
-  g->fillCircle(CX + eye_offset, CY - 20, eye_radius, 0xFFFF);
-  g->fillCircle(CX - eye_offset, CY - 20, pupil_radius, 0x18FF);
-  g->fillCircle(CX + eye_offset, CY - 20, pupil_radius, 0x18FF);
-  g->fillCircle(CX - eye_offset + 6, CY - 26, 5, 0xFFFF);
-  g->fillCircle(CX + eye_offset + 6, CY - 26, 5, 0xFFFF);
-  g->fillRoundRect(CX - 32, CY + 70, 64, 10, 5, 0xFFFF);
-
-  g->setTextColor(0xFFFF);
-  g->setCursor(CX - 56, CY + 110);
-  g->setTextSize(2, 2, 0);
-  g->print("Robimon");
-}
-
 }  // namespace
 
 void setup() {
@@ -84,7 +54,11 @@ void setup() {
   if (!robimon::hal::imu::begin())     LOG_W(TAG, "IMU not ready");
   if (!robimon::hal::audio::begin())   LOG_W(TAG, "audio not ready");
 
-  draw_boot_face(robimon::hal::display::gfx());
+  robimon::face::begin();
+  // Demo-cycle through expressions so the renderer can be verified visually
+  // before the radial menu UI lands. Disable in stage D when touch picks them.
+  robimon::face::enable_demo_cycle(true);
+
   robimon::stats::begin();
 
 #if defined(ROBIMON_BOOT_TEST_TONE) && (ROBIMON_BOOT_TEST_TONE == 1)
@@ -98,15 +72,12 @@ void setup() {
 }
 
 void loop() {
+  // Touch is read but not yet wired to anything; placeholder for stage D.
   robimon::hal::touch::Point pts[1];
-  const int n = robimon::hal::touch::read(pts, 1);
-  if (n > 0) {
-    auto* g = robimon::hal::display::gfx();
-    g->fillCircle(pts[0].x, pts[0].y, 6, 0xF800);
-    LOG_D(TAG, "touch %d,%d", pts[0].x, pts[0].y);
-  }
+  (void)robimon::hal::touch::read(pts, 1);
 
+  robimon::face::update();
   robimon::stats::note_frame();
   robimon::stats::tick();
-  delay(5);
+  delay(2);
 }

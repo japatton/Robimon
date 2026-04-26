@@ -1,0 +1,48 @@
+// Face renderer — parametric vector face drawn directly to the panel.
+// Owns the FaceParams state, tween between expressions, and idle behaviors
+// (blink / breathing / saccade).
+//
+// Renders via Arduino_GFX directly (no LVGL yet). When LVGL screens land
+// in stage D, this module will gain a "render into a buffer" mode and the
+// face screen will host that buffer in an lv_canvas. For now it pokes the
+// panel directly through the display HAL.
+
+#pragma once
+
+#include <stdint.h>
+
+namespace robimon::face {
+
+enum class Expression : uint8_t {
+  NEUTRAL,
+  HAPPY,
+  SAD,
+  SLEEPY,
+  SURPRISED,
+  ANGRY,
+  THINKING,
+  EXCITED,
+  CONFUSED,
+  LISTENING,
+  SPEAKING,
+  // LOVE — special-cased heart eyes; deferred until we have an icon path
+};
+
+bool begin();
+
+// Set the target expression. The renderer tweens current → target over
+// `tween_ms` (snappy for surprised/excited, slow for sleepy/sad).
+void set_expression(Expression e, uint16_t tween_ms = 250);
+
+// Call from the main loop. Advances tween + idle behaviors and redraws if
+// anything changed. Cheap if nothing changed.
+void update();
+
+// Toggles a simple demo loop that cycles through expressions every few
+// seconds. Useful for visual verification before the touch UI is in.
+void enable_demo_cycle(bool on);
+
+// Current expression name as a c-string (for logs).
+const char* current_name();
+
+}  // namespace robimon::face

@@ -1,20 +1,22 @@
-// Display HAL — wraps Arduino_GFX (CO5300 over QSPI) with the small
-// surface area the rest of the firmware needs. The face renderer and
-// LVGL bind to this; nobody else should #include Arduino_GFX directly.
+// Display HAL — wraps Arduino_GFX (CO5300 over QSPI) and an Arduino_Canvas
+// back-buffer in PSRAM. All drawing goes through the canvas; flush() pushes
+// the buffer to the panel in one QSPI burst, gated on the CO5300's TE pin.
+//
+// Direct-to-panel writes are not supported: writing primitives during the
+// panel's scanout produces visible tearing on AMOLED. The back-buffer is
+// 466×466 RGB565 in PSRAM (~434 KB) — fits easily in our 8 MB OPI PSRAM.
 //
 // CO5300 hardware quirks worth knowing:
 //   - 6-pixel column window offset baked into address registers.
-//     The Arduino_CO5300 constructor takes this as col_offset1; we pass 6.
-//   - QSPI runs at ~80 MHz with this driver; double-buffered DMA flushes
-//     happen out of PSRAM (LVGL allocates the buffers, we just push them).
-//   - TE pin (GPIO 13) is wired and useful for tear-free transitions.
-//     Phase 1: ignored. Phase 2: gate flush on TE rising edge.
+//     Arduino_CO5300 takes this as col_offset1; we pass 6.
+//   - QSPI runs at the panel driver's default speed; ~80 MHz on this MCU.
+//   - TE pin (GPIO 13) pulses high once per refresh; flush() blocks on the
+//     rising edge (with a bounded timeout) before pushing.
 
 #pragma once
 
 #include <stdint.h>
 
-class Arduino_DataBus;
 class Arduino_GFX;
 
 namespace robimon::hal::display {
@@ -24,18 +26,24 @@ bool begin();
 // Set panel brightness (0..255). Implemented via CO5300 register write.
 void set_brightness(uint8_t brightness_0_255);
 
-// Push a raw RGB565 region to the panel. Used by LVGL flush callback.
-// Coordinates are inclusive; data is row-major, byte-swapped (matches LV_COLOR_16_SWAP=1).
-void flush(int x1, int y1, int x2, int y2, const uint16_t* px);
-
-// Block until the next TE pulse. No-op until we wire it up; see header comment.
-void wait_for_te();
-
-// Escape hatch for early bring-up when we just want to draw shapes directly.
-// Avoid in production code — go through LVGL.
+// Returns the back-buffer GFX. Draw your frame here, then call flush().
+// Methods inherit from Arduino_GFX: fillRect, fillCircle, fillEllipse,
+// fillTriangle, fillArc, drawLine, setCursor/print, etc.
 Arduino_GFX* gfx();
 
-int width();
-int height();
+// Wait for the next TE rising edge (≈ start of vsync porch). Bounded so a
+// stuck TE never deadlocks the caller.
+void wait_for_te();
+
+// Push the back-buffer to the panel in one QSPI burst. Cheap to call back
+// to back; you decide the frame cadence.
+void flush();
+
+int width();   // canvas width  (panel-equivalent x)
+int height();  // canvas height (NOT panel height — see canvas_panel_y_offset())
+
+// The canvas covers a band of the panel; its local (0, 0) maps to panel
+// (0, canvas_panel_y_offset()). Use canvas-local coords when drawing.
+int canvas_panel_y_offset();
 
 }  // namespace robimon::hal::display
