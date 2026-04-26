@@ -4,13 +4,12 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <TouchDrvCSTXXX.hpp>
+#include <TouchDrv.hpp>
 
 namespace robimon::hal::touch {
 
 namespace {
 constexpr const char* TAG = "touch";
-constexpr int MAX_HW_POINTS = 5;
 
 TouchDrvCST92xx s_drv;
 bool            s_ready = false;
@@ -39,13 +38,13 @@ bool begin() {
 int read(Point* out_points, int max_points) {
   if (!s_ready || !out_points || max_points <= 0) return 0;
 
-  int16_t xs[MAX_HW_POINTS];
-  int16_t ys[MAX_HW_POINTS];
-  const uint8_t n = s_drv.getPoint(xs, ys, MAX_HW_POINTS);
-  const int report_n = (int)n < max_points ? (int)n : max_points;
+  const TouchPoints& tp = s_drv.getTouchPoints();
+  const int n = (int)tp.getPointCount();
+  const int report_n = n < max_points ? n : max_points;
   for (int i = 0; i < report_n; ++i) {
-    out_points[i].x = xs[i];
-    out_points[i].y = ys[i];
+    const TouchPoint& pt = tp.getPoint((uint8_t)i);
+    out_points[i].x = (int16_t)pt.x;
+    out_points[i].y = (int16_t)pt.y;
   }
   return report_n;
 }

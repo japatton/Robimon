@@ -2,6 +2,7 @@
 #include "log.h"
 
 #include <Arduino.h>
+#include <atomic>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <WiFi.h>
@@ -11,9 +12,12 @@ namespace robimon::stats {
 namespace {
 constexpr uint32_t REPORT_INTERVAL_MS = 5000;
 
-volatile uint32_t  s_frame_count = 0;
-uint32_t           s_last_report_ms = 0;
-Snapshot           s_last{};
+// std::atomic so the LVGL flush callback (Core 1) can bump this safely
+// while the stats reporter (Core 0) reads it. C++20 deprecates ++ on a
+// plain volatile — atomic is the correct fix anyway.
+std::atomic<uint32_t> s_frame_count{0};
+uint32_t              s_last_report_ms = 0;
+Snapshot              s_last{};
 
 void sample(Snapshot& out) {
   out.uptime_ms            = (uint32_t)(esp_timer_get_time() / 1000);
@@ -42,7 +46,7 @@ void begin() {
 }
 
 void note_frame() {
-  s_frame_count++;
+  s_frame_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 Snapshot last() {
@@ -50,9 +54,7 @@ Snapshot last() {
 }
 
 void print_now() {
-  // Atomic-ish frame count read — concurrent producer is fine, we're sampling.
-  const uint32_t frames = s_frame_count;
-  s_frame_count = 0;
+  const uint32_t frames = s_frame_count.exchange(0, std::memory_order_relaxed);
 
   const uint32_t now = millis();
   const uint32_t elapsed_ms = now - s_last_report_ms;

@@ -10,9 +10,11 @@ namespace robimon::hal::display {
 namespace {
 constexpr const char* TAG = "lcd";
 
-Arduino_DataBus* s_bus = nullptr;
-Arduino_GFX*     s_gfx = nullptr;
-bool             s_te_attached = false;
+// Hold the typed pointer so we can call CO5300-specific methods like
+// setBrightness; expose it as Arduino_GFX* through the gfx() accessor.
+Arduino_DataBus*  s_bus = nullptr;
+Arduino_CO5300*   s_panel = nullptr;
+bool              s_te_attached = false;
 
 // CO5300 ctor: bus, rst, rotation, w, h, col_offset1, row_offset1, col_offset2, row_offset2.
 // Last three are rotation-dependent offsets the driver applies to address-window writes.
@@ -26,17 +28,17 @@ bool begin() {
       LCD_CS, LCD_QSPI_SCLK,
       LCD_QSPI_D0, LCD_QSPI_D1, LCD_QSPI_D2, LCD_QSPI_D3);
 
-  s_gfx = new Arduino_CO5300(
+  s_panel = new Arduino_CO5300(
       s_bus, LCD_RESET, /*rotation=*/0, LCD_WIDTH, LCD_HEIGHT,
       LCD_COL_OFFSET, 0, 0, 0);
 
-  if (!s_gfx->begin()) {
+  if (!s_panel->begin()) {
     LOG_E(TAG, "Arduino_CO5300::begin() failed");
     return false;
   }
 
-  s_gfx->fillScreen(0x0000);
-  s_gfx->setBrightness(180);
+  s_panel->fillScreen(0x0000);
+  s_panel->setBrightness(180);
 
   // Wire the TE pin as a plain input for now. We poll it from wait_for_te()
   // when the caller needs vsync; later we can switch to an attachInterrupt
@@ -49,15 +51,15 @@ bool begin() {
 }
 
 void set_brightness(uint8_t b) {
-  if (s_gfx) s_gfx->setBrightness(b);
+  if (s_panel) s_panel->setBrightness(b);
 }
 
 void flush(int x1, int y1, int x2, int y2, const uint16_t* px) {
-  if (!s_gfx) return;
+  if (!s_panel) return;
   const int w = x2 - x1 + 1;
   const int h = y2 - y1 + 1;
   // LV_COLOR_16_SWAP=1 means LVGL hands us already-byte-swapped RGB565.
-  s_gfx->draw16bitBeRGBBitmap(x1, y1, const_cast<uint16_t*>(px), w, h);
+  s_panel->draw16bitBeRGBBitmap(x1, y1, const_cast<uint16_t*>(px), w, h);
 }
 
 void wait_for_te() {
@@ -69,8 +71,8 @@ void wait_for_te() {
   while (digitalRead(robimon::board::LCD_TE) == HIGH && micros() < deadline_us) { delayMicroseconds(50); }
 }
 
-Arduino_GFX* gfx() { return s_gfx; }
-int width()  { return s_gfx ? s_gfx->width()  : 0; }
-int height() { return s_gfx ? s_gfx->height() : 0; }
+Arduino_GFX* gfx() { return s_panel; }
+int width()  { return s_panel ? s_panel->width()  : 0; }
+int height() { return s_panel ? s_panel->height() : 0; }
 
 }  // namespace robimon::hal::display

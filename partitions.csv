@@ -1,11 +1,9 @@
-# Partition table for Robimon (16 MB flash, OTA-capable)
-# Two 6 MB OTA app slots leave generous headroom for LVGL + future audio pipeline.
-# 3.5 MB SPIFFS holds packed face assets, fonts, settings JSON, and the rolling log buffer.
-# Coredump partition lets us pull a panic dump over OTA after a crash.
+# Partition table for Robimon (16 MB flash, OTA-capable).
+# OTA app partitions must start on a 64 KB boundary; otadata immediately precedes app0.
 
 # Name,     Type,  SubType,  Offset,    Size,      Flags
-nvs,        data,  nvs,      0x9000,    0x6000,
-otadata,    data,  ota,      0xF000,    0x2000,
+nvs,        data,  nvs,      0x9000,    0x5000,
+otadata,    data,  ota,      0xE000,    0x2000,
 app0,       app,   ota_0,    0x10000,   0x600000,
 app1,       app,   ota_1,    0x610000,  0x600000,
 spiffs,     data,  spiffs,   0xC10000,  0x3E0000,
