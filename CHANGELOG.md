@@ -4,6 +4,45 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.10.0-ha-H] — 2026-04-26
+
+### Added
+- `services/ha_client` — Home Assistant WebSocket client. Connects to
+  `ws://host:port/api/websocket` (port defaults to 8123, path defaults
+  to `/api/websocket`), authenticates with a long-lived access token,
+  subscribes to `state_changed` events, and caches state for tracked
+  entities. Auto-reconnects with 5 s backoff.
+- `screens/ha_settings_screen` — modal form with three field rows
+  (URL / token / entity) + forget. Each row pushes the text-input
+  modal so values can be entered with the on-screen keyboard.
+- `screens/ha_entity_screen` — carousel screen showing the configured
+  default entity (friendly name + state + age). "online" / "offline"
+  status header per spec (kid-safe; no IPs / stack traces). Empty
+  state when no entity is configured.
+- `services/serial_console` — line-buffered console over USB-CDC.
+  Commands: `help`, `set <key> <value>`, `get <key>` (`ha_token` and
+  `wifi_pass` masked when printed), `forget <key>`, `list`,
+  `ha-reconnect`, `status`. Lets the user paste long values (HA token,
+  URLs, system prompt) without typing them on the on-screen keyboard.
+- Carousel now: face → alarms → ha-entity (3 screens, cyclic).
+- "ha" tile in settings menu pushes the HA settings screen.
+
+### Notes
+- `get_states` (full HA state dump on auth) is intentionally NOT sent —
+  it's 100+ KB on a real install and exceeds the WebSocket library's
+  default 16 KB frame buffer, causing the server to drop the connection.
+  Cache populates from incremental `state_changed` events instead.
+- ArduinoJson nesting limit bumped to 20 (default 10) — some HA
+  state-changed events nest deeper for entities with rich attributes
+  (device_info / connections arrays).
+- HTTPS / TLS not yet supported. Internal-LAN only.
+- MQTT fallback (per the spec) is deferred — HA WebSocket reliably
+  works on the same LAN, which is the only setup the user has today.
+
+### Changed
+- platformio.ini: `links2004/WebSockets ^2.6.1` and
+  `bblanchon/ArduinoJson ^7.4.1` added.
+
 ## [0.9.0-alarms-G] — 2026-04-26
 
 ### Added

@@ -37,10 +37,14 @@
 #include "screens/about_screen.h"
 #include "screens/alarms_settings_screen.h"
 #include "screens/alarm_edit_screen.h"
+#include "screens/ha_settings_screen.h"
+#include "screens/ha_entity_screen.h"
 #include "services/config_store.h"
 #include "services/wifi_mgr.h"
 #include "services/time_svc.h"
 #include "services/alarm_mgr.h"
+#include "services/ha_client.h"
+#include "services/serial_console.h"
 #include "app/log.h"
 #include "app/stats.h"
 
@@ -84,6 +88,15 @@ void setup() {
   // Alarms: load saved alarms from NVS (firing happens once SNTP is synced).
   robimon::services::alarm_mgr::begin();
 
+  // HA client: starts in DISCONNECTED state and reconnects with backoff
+  // once WiFi comes up and creds are available.
+  robimon::services::ha_client::begin();
+  robimon::services::ha_client::auto_connect();
+
+  // Serial console for pasting long values (HA tokens, URLs, prompts) from
+  // the host terminal — much faster than the on-screen keyboard.
+  robimon::services::serial_console::begin();
+
   // Apply stored brightness preference (default level 5 = 176/255).
   {
     const uint8_t LVLS[] = { 16, 48, 80, 112, 144, 176, 208, 240 };
@@ -98,11 +111,12 @@ void setup() {
 
   robimon::ui::gestures::begin();
 
-  // Stage E: screen manager. Face is the default screen (index 0); alarms
-  // is the second. Settings is reached via long-press + PIN, NOT swipe.
+  // Stage E/H: screen manager carousel — face → alarms → ha entity.
+  // Settings is reached via long-press + PIN, NOT swipe.
   robimon::ui::screen_mgr::begin();
   robimon::ui::screen_mgr::add_screen(&robimon::screens::face_screen);
   robimon::ui::screen_mgr::add_screen(&robimon::screens::alarms_screen);
+  robimon::ui::screen_mgr::add_screen(&robimon::screens::ha_entity_screen);
 
   robimon::stats::begin();
 
@@ -171,6 +185,8 @@ void loop() {
   robimon::services::wifi_mgr::update(millis());
   robimon::services::time_svc::update(millis());
   robimon::services::alarm_mgr::update(millis());
+  robimon::services::ha_client::update(millis());
+  robimon::services::serial_console::update(millis());
 
   // Watch for alarm firing transitions so the face overlay + alarm sound
   // match the alarm_mgr state. Doing this in main keeps alarm_mgr free of
