@@ -4,6 +4,31 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.7.0-wifi-F2] — 2026-04-26
+
+### Added
+- `services/wifi_mgr` — WiFi state machine with async scan, manual
+  connect, and credential persistence into config_store NVS. Auto-
+  connect on boot when saved creds exist; silent no-op otherwise.
+- `screens/wifi_setup_screen` — modal wifi UI with current connection
+  status, scan button, scrollable network list (SSID, "L" lock
+  indicator for secured nets, RSSI), and a forget button when
+  connected. Round-display-safe layout (~340 px content width,
+  centered, all elements within the inscribed circle).
+- `screens/text_input_screen` — generic text-entry modal with QWERTY
+  on-screen keyboard. Supports lower/UPPER toggle (auto-deshift after
+  one shifted letter), 123/symbol page, masked input + show/hide
+  toggle, configurable max length, and a callback that fires on done
+  or cancel. Reused by HA URL/token, Ollama URL, system prompt
+  editor, etc. in later stages.
+- "wifi" tile in the settings menu now pushes the wifi setup screen.
+
+### Changed
+- Keyboard keys bumped from 40×32 to 40×38 for less mistapping.
+- WiFi screen layout reworked to be round-display-aware after the
+  initial release rendered the back button into the bezel-corner
+  region.
+
 ## [0.6.0-settings-F1] — 2026-04-26
 
 ### Added

@@ -31,7 +31,9 @@
 #include "screens/alarms_screen.h"
 #include "screens/pin_pad_screen.h"
 #include "screens/settings_menu_screen.h"
+#include "screens/wifi_setup_screen.h"
 #include "services/config_store.h"
+#include "services/wifi_mgr.h"
 #include "app/log.h"
 #include "app/stats.h"
 
@@ -61,6 +63,11 @@ void setup() {
   if (!robimon::hal::imu::begin())     LOG_W(TAG, "IMU not ready");
   if (!robimon::hal::audio::begin())   LOG_W(TAG, "audio not ready");
   if (!robimon::services::config::begin()) LOG_W(TAG, "config store not ready");
+
+  robimon::services::wifi_mgr::begin();
+  // Best-effort auto-connect using whatever creds are saved in NVS. Silent
+  // no-op on a fresh device.
+  robimon::services::wifi_mgr::auto_connect();
 
   robimon::face::begin();
   // Stage D: touch drives expressions. Demo cycle off by default; the user
@@ -122,6 +129,7 @@ void loop() {
       break;
   }
 
+  robimon::services::wifi_mgr::update(millis());
   robimon::ui::screen_mgr::update(millis());
   robimon::stats::note_frame();
   robimon::stats::tick();

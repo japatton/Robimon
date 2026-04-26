@@ -1,4 +1,5 @@
 #include "settings_menu_screen.h"
+#include "wifi_setup_screen.h"
 #include "../hal/display.h"
 #include "../app/log.h"
 
@@ -118,8 +119,11 @@ void SettingsMenuScreen::on_tap(int panel_x, int panel_y) {
     const int y = GRID_Y0  + row * (CELL_H + CELL_GAP);
     if (panel_x >= x && panel_x < x + CELL_W &&
         canvas_y >= y && canvas_y < y + CELL_H) {
-      LOG_I(TAG, "tapped section: %s (stub for now)", SECTIONS[i].label);
-      // TODO: push the section screen (F-2..F-4)
+      LOG_I(TAG, "tapped section: %s", SECTIONS[i].label);
+      // Wire each section as it ships. Stubs log + return.
+      if (strcmp(SECTIONS[i].label, "wifi") == 0) {
+        ::robimon::ui::screen_mgr::push_modal(&wifi_setup_screen);
+      }
       return;
     }
   }
