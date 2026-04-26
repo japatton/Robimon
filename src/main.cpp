@@ -32,8 +32,12 @@
 #include "screens/pin_pad_screen.h"
 #include "screens/settings_menu_screen.h"
 #include "screens/wifi_setup_screen.h"
+#include "screens/time_settings_screen.h"
+#include "screens/display_settings_screen.h"
+#include "screens/about_screen.h"
 #include "services/config_store.h"
 #include "services/wifi_mgr.h"
+#include "services/time_svc.h"
 #include "app/log.h"
 #include "app/stats.h"
 
@@ -68,6 +72,16 @@ void setup() {
   // Best-effort auto-connect using whatever creds are saved in NVS. Silent
   // no-op on a fresh device.
   robimon::services::wifi_mgr::auto_connect();
+
+  // Time service: applies stored TZ immediately; SNTP starts after WiFi connects.
+  robimon::services::time_svc::begin();
+
+  // Apply stored brightness preference (default level 5 = 176/255).
+  {
+    const uint8_t LVLS[] = { 16, 48, 80, 112, 144, 176, 208, 240 };
+    const uint32_t idx = robimon::services::config::get_uint("disp_b", 5);
+    if (idx < sizeof(LVLS)) robimon::hal::display::set_brightness(LVLS[idx]);
+  }
 
   robimon::face::begin();
   // Stage D: touch drives expressions. Demo cycle off by default; the user
@@ -130,6 +144,7 @@ void loop() {
   }
 
   robimon::services::wifi_mgr::update(millis());
+  robimon::services::time_svc::update(millis());
   robimon::ui::screen_mgr::update(millis());
   robimon::stats::note_frame();
   robimon::stats::tick();

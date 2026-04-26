@@ -4,6 +4,28 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.8.0-time-F3] — 2026-04-26
+
+### Added
+- `services/time_svc` — SNTP wrapper. Starts after WiFi connects, syncs
+  against pool.ntp.org / time.google.com / time.cloudflare.com.
+  Timezone is a POSIX TZ string saved in NVS; defaults to Central
+  (`CST6CDT,M3.2.0,M11.1.0`) for Swansea, IL. 8 US-zone presets
+  exposed via `TZ_PRESETS` for the settings UI.
+- `screens/time_settings_screen` — live HH:MM:SS clock + sync status
+  + current TZ name + tap-to-pick list of TZ presets.
+- `screens/display_settings_screen` — 8-segment brightness slider
+  (applies live, persists), idle-dim and sleep-timeout pickers (saved
+  but not yet enforced — needs idle manager).
+- `screens/about_screen` — version, board name, free heap/PSRAM, MAC,
+  uptime, and a stub "OTA (soon)" button.
+- Boot now applies the saved brightness preference.
+
+### Changed
+- Settings menu wires the `wifi`, `time`, `display`, and `about`
+  tiles to push their respective modals; `ha`, `voice`, `alarms`,
+  and `PIN` tiles still log "stub" and stay no-op until F-4 / G.
+
 ## [0.7.0-wifi-F2] — 2026-04-26
 
 ### Added

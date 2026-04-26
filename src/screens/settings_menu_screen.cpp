@@ -1,5 +1,8 @@
 #include "settings_menu_screen.h"
 #include "wifi_setup_screen.h"
+#include "time_settings_screen.h"
+#include "display_settings_screen.h"
+#include "about_screen.h"
 #include "../hal/display.h"
 #include "../app/log.h"
 
@@ -120,10 +123,12 @@ void SettingsMenuScreen::on_tap(int panel_x, int panel_y) {
     if (panel_x >= x && panel_x < x + CELL_W &&
         canvas_y >= y && canvas_y < y + CELL_H) {
       LOG_I(TAG, "tapped section: %s", SECTIONS[i].label);
-      // Wire each section as it ships. Stubs log + return.
-      if (strcmp(SECTIONS[i].label, "wifi") == 0) {
-        ::robimon::ui::screen_mgr::push_modal(&wifi_setup_screen);
-      }
+      const char* lbl = SECTIONS[i].label;
+      if      (strcmp(lbl, "wifi")    == 0) ::robimon::ui::screen_mgr::push_modal(&wifi_setup_screen);
+      else if (strcmp(lbl, "time")    == 0) ::robimon::ui::screen_mgr::push_modal(&time_settings_screen);
+      else if (strcmp(lbl, "display") == 0) ::robimon::ui::screen_mgr::push_modal(&display_settings_screen);
+      else if (strcmp(lbl, "about")   == 0) ::robimon::ui::screen_mgr::push_modal(&about_screen);
+      // ha / voice / alarms / PIN tiles still stub for now (F-3+/F-4)
       return;
     }
   }
