@@ -1,5 +1,6 @@
-// Runtime stats reporter: free heap, free PSRAM, FPS, uptime, WiFi RSSI.
-// Published over Serial periodically and surfaced on the diagnostics screen.
+// Runtime stats reporter: free heap, free PSRAM, FPS, uptime, WiFi RSSI,
+// battery state, IMU motion magnitude. Published over Serial periodically
+// and surfaced on the diagnostics screen.
 
 #pragma once
 
@@ -14,6 +15,13 @@ struct Snapshot {
   uint32_t free_psram_bytes;
   uint32_t fps;          // averaged over the last sampling window
   int32_t  wifi_rssi;    // 0 if WiFi not connected
+  uint8_t  battery_pct;  // 0..100, 0xFF if PMIC not ready
+  float    battery_v;
+  float    vbus_v;
+  bool     vbus_present;
+  bool     is_charging;
+  uint8_t  charge_state; // matches power::ChargeState (0=unknown..5=fault)
+  float    accel_mag_g;  // sqrt(ax^2 + ay^2 + az^2); ~1.0 at rest
 };
 
 // Call once from app setup.

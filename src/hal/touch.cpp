@@ -19,7 +19,9 @@ bool begin() {
   using namespace robimon::board;
 
   s_drv.setPins(TP_RESET, TP_INT);
-  if (!s_drv.begin(Wire, TP_I2C_ADDR, I2C_SDA, I2C_SCL)) {
+  // Pass -1/-1 for sda/scl: Wire is already initialized in main.
+  // Re-passing the pins triggers a noisy "bus already initialized" warning.
+  if (!s_drv.begin(Wire, TP_I2C_ADDR, -1, -1)) {
     LOG_E(TAG, "CST9217 not found at 0x%02X", TP_I2C_ADDR);
     return false;
   }
