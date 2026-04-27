@@ -56,6 +56,10 @@ void on_tap(int panel_x, int panel_y);
 // gestures (swipes are ignored while the menu is open, etc.).
 bool menu_is_open();
 
+// Force-dismiss the radial menu if it's open. Used by the double-tap
+// handler in main.cpp to roll back the menu the first TAP just opened.
+void dismiss_menu();
+
 // Show a short "we saw your gesture" text flash. Used as a visual confirm
 // for long-press / swipe until the screen-manager and settings UI land.
 void flash_text(const char* text);

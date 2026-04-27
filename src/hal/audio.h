@@ -39,6 +39,11 @@ size_t capture(int16_t* samples, size_t max_count);
 // confirmation. Blocks for ~120 ms.
 void play_test_tone();
 
+// Brief "ready to listen" cue — a single ~80 ms blip at 1 kHz. Played
+// before voice recording starts so the user knows when to start talking.
+// Blocks for ~120 ms total (cue + amp settling).
+void play_listen_cue();
+
 // Alarm sound — repeating two-tone chime that loops on a background task
 // pinned to core 0 so the UI on core 1 stays responsive. start_alarm() is
 // idempotent (no-op if the alarm is already playing); stop_alarm() returns

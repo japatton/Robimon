@@ -46,6 +46,7 @@
 #include "services/ha_client.h"
 #include "services/serial_console.h"
 #include "services/setup_portal.h"
+#include "services/voice_client.h"
 #include "screens/setup_screen.h"
 #include "app/log.h"
 #include "app/stats.h"
@@ -137,6 +138,9 @@ void setup() {
   robimon::services::ha_client::begin();
   robimon::services::ha_client::auto_connect();
 
+  // Voice client (Stage J): double-tap on the face triggers it.
+  robimon::services::voice::begin();
+
   // Serial console for pasting long values (HA tokens, URLs, prompts) from
   // the host terminal — much faster than the on-screen keyboard.
   robimon::services::serial_console::begin();
@@ -212,6 +216,19 @@ void loop() {
       }
       break;
     }
+    case robimon::ui::gestures::Event::DOUBLE_TAP: {
+      // Voice mode is only meaningful from the face screen; on other
+      // screens we ignore double-tap and let the prior TAP stand.
+      const auto* cur = robimon::ui::screen_mgr::current();
+      if (cur && strcmp(cur->name(), "face") == 0) {
+        // The first tap already opened the radial menu — close it back up
+        // so the user lands directly in voice mode.
+        robimon::face::dismiss_menu();
+        LOG_I(TAG, "double-tap -> voice");
+        robimon::services::voice::start();
+      }
+      break;
+    }
     case robimon::ui::gestures::Event::LONG_PRESS:
       // Long-press opens the PIN pad if no modal is already up.
       if (alarm_firing) {
@@ -242,6 +259,7 @@ void loop() {
   robimon::services::time_svc::update(millis());
   robimon::services::alarm_mgr::update(millis());
   robimon::services::ha_client::update(millis());
+  robimon::services::voice::update(millis());
   robimon::services::serial_console::update(millis());
 
   // Watch for alarm firing transitions so the face overlay + alarm sound

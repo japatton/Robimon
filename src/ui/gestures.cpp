@@ -28,9 +28,21 @@ constexpr uint32_t RELEASE_DEBOUNCE_MS = 40;
 // period so the actual finger lift doesn't get re-interpreted (a tap on
 // the destination screen continuing a swipe, or a glitch-fragmented tap
 // firing 2-3 PIN digits per press).
-constexpr uint32_t POST_TAP_QUIET_MS   = 200;
+//
+// Tap quiet was 200 ms but that ate the second tap of most natural
+// double-taps (typical release-to-release gap is ~200-300 ms). The
+// release-debounce state machine already handles single-frame flutter,
+// so 60 ms is enough as a backstop and leaves headroom for double-tap.
+constexpr uint32_t POST_TAP_QUIET_MS   = 60;
 constexpr uint32_t POST_LP_QUIET_MS    = 200;
 constexpr uint32_t POST_SWIPE_QUIET_MS = 250;
+
+// Double-tap detection. After we emit a TAP, we remember the time + spot.
+// If another TAP follows within DOUBLE_TAP_MAX_GAP_MS at roughly the same
+// spot, we queue a DOUBLE_TAP event for the next call (consumers see TAP
+// first, then DOUBLE_TAP, and roll back as needed).
+constexpr uint32_t DOUBLE_TAP_MAX_GAP_MS = 400;
+constexpr int      DOUBLE_TAP_MAX_DIST_PX = 80;
 
 enum class State : uint8_t { IDLE, ACTIVE, RELEASING };
 
@@ -42,16 +54,32 @@ Point    s_touch_last_pt       = {0, 0};
 uint32_t s_quiet_until_ms      = 0;
 Point    s_last_event_pt       = {0, 0};
 
+uint32_t s_last_tap_ms         = 0;
+Point    s_last_tap_pt         = {0, 0};
+bool     s_emit_double_tap     = false;
+Point    s_double_tap_pt       = {0, 0};
+
 }  // namespace
 
 void begin() {
   s_state = State::IDLE;
   s_quiet_until_ms = 0;
+  s_last_tap_ms = 0;
+  s_emit_double_tap = false;
 }
 
 Event update(int n_touches, Point pt) {
   const bool now_down = (n_touches > 0);
   const uint32_t now = millis();
+
+  // Pending DOUBLE_TAP gets emitted as soon as the consumer pulls the next
+  // event — that way single-tap consumers see the TAP fire instantly and
+  // double-tap consumers get a follow-up to roll the action back.
+  if (s_emit_double_tap) {
+    s_emit_double_tap = false;
+    s_last_event_pt = s_double_tap_pt;
+    return Event::DOUBLE_TAP;
+  }
 
   // Quiet window after any gesture — drop state so we re-enter cleanly.
   if (now < s_quiet_until_ms) {
@@ -118,6 +146,21 @@ Event update(int n_touches, Point pt) {
         if (dur < TAP_MAX_MS && abs_dx <= TAP_MAX_MOTION_PX && abs_dy <= TAP_MAX_MOTION_PX) {
           s_last_event_pt = s_touch_start_pt;
           s_quiet_until_ms = now + POST_TAP_QUIET_MS;
+
+          // Was this the second of a double-tap?
+          const int gap_dx = abs((int)s_touch_start_pt.x - (int)s_last_tap_pt.x);
+          const int gap_dy = abs((int)s_touch_start_pt.y - (int)s_last_tap_pt.y);
+          if (s_last_tap_ms != 0
+              && (now - s_last_tap_ms) < DOUBLE_TAP_MAX_GAP_MS
+              && gap_dx <= DOUBLE_TAP_MAX_DIST_PX
+              && gap_dy <= DOUBLE_TAP_MAX_DIST_PX) {
+            s_emit_double_tap = true;
+            s_double_tap_pt   = s_touch_start_pt;
+            s_last_tap_ms     = 0;   // require fresh start for the next pair
+          } else {
+            s_last_tap_ms = now;
+            s_last_tap_pt = s_touch_start_pt;
+          }
           return Event::TAP;
         }
         return Event::NONE;

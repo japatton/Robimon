@@ -1,5 +1,6 @@
 #include "face.h"
 #include "../hal/display.h"
+#include "../services/voice_client.h"
 #include "../app/log.h"
 
 #include <Arduino.h>
@@ -41,6 +42,16 @@ constexpr int CORNER_CELLS   = 2;       // chamfer K cells from each corner
 // Vertical centers within the canvas. Set in begin() from canvas height.
 int s_face_cy   = 160;   // eyes
 int s_mouth_cy  = 270;   // mouth (centered horizontally)
+
+// Robot "mouth" — a vocoder-style speaker grille that doubles as the
+// voice-mode button. Replaces the kawaii pixel mouth. Centered at the
+// canvas position previously occupied by the mouth.
+constexpr int MOUTH_BTN_W      = 130;
+constexpr int MOUTH_BTN_H      = 36;
+constexpr int MOUTH_BAR_COUNT  = 9;
+constexpr int MOUTH_BAR_W      = 6;
+constexpr int MOUTH_BAR_H      = 22;
+constexpr int MOUTH_BAR_GAP    = 6;
 
 constexpr int MOUTH_CX       = PANEL_W / 2;
 
@@ -282,6 +293,11 @@ const char* s_flash_text = "";
 // Persistent label overlay (e.g., alarm name). Empty string when none.
 char        s_label[28] = {0};
 
+// (Double-tap detection lives in the gesture detector now — it emits a
+// DOUBLE_TAP event after a TAP when a quick second tap follows. main.cpp
+// translates that into face::dismiss_menu() + voice::start(). Keeping the
+// face::on_tap path instant means single-tap menu open isn't laggy.)
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -430,6 +446,28 @@ void draw_menu() {
   }
 }
 
+// Robot mouth: cyan rounded frame with 9 vertical bars inside (vocoder /
+// speaker grille). Centered on the canvas at s_mouth_cy. The whole frame
+// is the hit target for voice mode — see on_tap().
+void draw_robot_mouth(Arduino_GFX* g) {
+  const int x = (g->width() - MOUTH_BTN_W) / 2;
+  const int y = s_mouth_cy - MOUTH_BTN_H / 2;
+
+  // Outer frame (2 px stroke)
+  g->drawRoundRect(x,     y,     MOUTH_BTN_W,     MOUTH_BTN_H,     8, COLOR_EYE);
+  g->drawRoundRect(x + 1, y + 1, MOUTH_BTN_W - 2, MOUTH_BTN_H - 2, 7, COLOR_EYE);
+
+  // Vertical bars centered inside the frame
+  const int bars_total_w = MOUTH_BAR_COUNT * MOUTH_BAR_W
+                         + (MOUTH_BAR_COUNT - 1) * MOUTH_BAR_GAP;
+  const int bars_x = x + (MOUTH_BTN_W - bars_total_w) / 2;
+  const int bars_y = y + (MOUTH_BTN_H - MOUTH_BAR_H) / 2;
+  for (int i = 0; i < MOUTH_BAR_COUNT; ++i) {
+    g->fillRect(bars_x + i * (MOUTH_BAR_W + MOUTH_BAR_GAP),
+                bars_y, MOUTH_BAR_W, MOUTH_BAR_H, COLOR_EYE);
+  }
+}
+
 void render_face(const FaceParams& p) {
   Arduino_GFX* g = robimon::hal::display::gfx();
   g->fillScreen(COLOR_BG);
@@ -446,15 +484,16 @@ void render_face(const FaceParams& p) {
                      p.right.top_lid_outer, p.right.top_lid_inner,
                      p.right.bot_lid_outer, p.right.bot_lid_inner);
 
-  draw_mouth(p.mouth);
-
-  // Optional label overlay below the mouth (e.g., alarm name). Centered.
+  // Robot mouth + voice button. When an alarm label is showing, the label
+  // takes the mouth area's space so the two don't fight.
   if (s_label[0]) {
     g->setTextSize(3);
     g->setTextColor(COLOR_EYE);
     const int lw = (int)strlen(s_label) * 18;
-    g->setCursor(g->width() / 2 - lw / 2, s_mouth_cy + 24);
+    g->setCursor(g->width() / 2 - lw / 2, s_mouth_cy - 12);
     g->print(s_label);
+  } else {
+    draw_robot_mouth(g);
   }
 }
 
@@ -595,33 +634,53 @@ void update() {
 }
 
 void on_tap(int panel_x, int panel_y) {
-  // Convert panel y to canvas-local for hit testing (canvas x already matches).
   const int canvas_y = panel_y - robimon::hal::display::canvas_panel_y_offset();
 
   if (s_mode == FaceMode::IDLE) {
+    // Robot mouth hit-test takes priority over menu-open. Don't trigger
+    // when an alarm label is showing (mouth isn't drawn then).
+    if (!s_label[0]) {
+      const int btn_x = (PANEL_W - MOUTH_BTN_W) / 2;
+      const int btn_y = s_mouth_cy - MOUTH_BTN_H / 2;
+      if (panel_x >= btn_x && panel_x < btn_x + MOUTH_BTN_W &&
+          canvas_y >= btn_y && canvas_y < btn_y + MOUTH_BTN_H) {
+        LOG_I(TAG, "mouth tapped -> voice");
+        ::robimon::services::voice::start();
+        return;
+      }
+    }
+
     s_mode = FaceMode::MENU;
     s_menu_open_ms = millis();
-    s_demo_on = false;   // user is driving expressions now; pause demo
+    s_demo_on = false;
     LOG_I(TAG, "menu opened");
     return;
   }
 
-  // Menu is open — hit-test items.
-  for (int i = 0; i < MENU_COUNT; ++i) {
-    int cx, cy;
-    menu_item_center_canvas(i, &cx, &cy);
-    const int dx = panel_x - cx;
-    const int dy = canvas_y - cy;
-    if (dx * dx + dy * dy <= MENU_ITEM_R * MENU_ITEM_R) {
-      LOG_I(TAG, "menu pick: %s", MENU_ITEMS[i].label);
-      set_expression(MENU_ITEMS[i].expr, 350);
-      s_mode = FaceMode::IDLE;
-      return;
+  if (s_mode == FaceMode::MENU) {
+    for (int i = 0; i < MENU_COUNT; ++i) {
+      int cx, cy;
+      menu_item_center_canvas(i, &cx, &cy);
+      const int dx = panel_x - cx;
+      const int dy = canvas_y - cy;
+      if (dx * dx + dy * dy <= MENU_ITEM_R * MENU_ITEM_R) {
+        LOG_I(TAG, "menu pick: %s", MENU_ITEMS[i].label);
+        set_expression(MENU_ITEMS[i].expr, 350);
+        s_mode = FaceMode::IDLE;
+        return;
+      }
     }
+    s_mode = FaceMode::IDLE;
+    LOG_I(TAG, "menu dismissed (tap outside)");
+    return;
   }
-  // Tap outside any item → dismiss without changing.
-  s_mode = FaceMode::IDLE;
-  LOG_I(TAG, "menu dismissed (tap outside)");
+}
+
+void dismiss_menu() {
+  if (s_mode == FaceMode::MENU) {
+    s_mode = FaceMode::IDLE;
+    LOG_I(TAG, "menu dismissed (double-tap)");
+  }
 }
 
 bool menu_is_open() { return s_mode == FaceMode::MENU; }

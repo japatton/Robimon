@@ -18,6 +18,7 @@ namespace robimon::ui::gestures {
 enum class Event : uint8_t {
   NONE,
   TAP,
+  DOUBLE_TAP,    // emitted on the second tap of a quick pair (after the TAP)
   LONG_PRESS,
   SWIPE_LEFT,
   SWIPE_RIGHT,

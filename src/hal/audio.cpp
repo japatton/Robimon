@@ -5,6 +5,7 @@
 extern "C" {
 #include "codec/es8311.h"
 }
+#include "codec/es7210.h"
 
 #include <Arduino.h>
 #include <ESP_I2S.h>
@@ -23,6 +24,14 @@ es8311_handle_t s_codec      = nullptr;
 uint32_t        s_sample_rate = DEFAULT_SAMPLE_RATE;
 bool            s_ok          = false;
 bool            s_amp_on      = false;
+
+// ES7210 mic capture uses the same ESP_I2S peripheral as ES8311 playback —
+// we can't run both simultaneously (shared BCLK + WS pins) but switching
+// between modes is cheap. ES7210 needs its own MCLK pin (GPIO 16) since
+// the board wires the two chips' MCLKs separately.
+constexpr int  ES7210_MCLK_PIN = 16;
+bool s_es7210_ready = false;
+bool s_capture_mode = false;
 
 // ---- Alarm playback state -------------------------------------------------
 TaskHandle_t        s_alarm_task = nullptr;
@@ -56,10 +65,11 @@ esp_err_t init_codec(uint32_t sample_rate) {
   if (r != ESP_OK) return r;
   es8311_microphone_gain_set(s_codec, ES8311_MIC_GAIN_18DB);
 
-  // Boot at a moderate volume so alarms and the test tone are audible without
-  // being startling. Stays below the project's 70 % spec cap.
+  // Boot at the project's spec cap (70 %). Anything quieter and voice TTS is
+  // hard to hear at 1-2 m on the small NS4150B speaker. Per-call boosts
+  // (test tone, alarm) still bump to MAX_VOLUME_PERCENT and restore.
   int actually_set = 0;
-  es8311_voice_volume_set(s_codec, 55, &actually_set);
+  es8311_voice_volume_set(s_codec, MAX_VOLUME_PERCENT, &actually_set);
 
   return ESP_OK;
 }
@@ -89,10 +99,65 @@ bool begin(uint32_t sample_rate) {
     return false;
   }
 
+  // Initialize ES7210 over I2C — it doesn't take I2S yet (that happens in
+  // capture()) but the codec's analog/clock config gets done here.
+  audio_hal_codec_config_t adc_cfg = {};
+  adc_cfg.adc_input  = AUDIO_HAL_ADC_INPUT_ALL;
+  adc_cfg.codec_mode = AUDIO_HAL_CODEC_MODE_ENCODE;
+  adc_cfg.i2s_iface.mode    = AUDIO_HAL_MODE_SLAVE;
+  adc_cfg.i2s_iface.fmt     = AUDIO_HAL_I2S_NORMAL;
+  adc_cfg.i2s_iface.samples = AUDIO_HAL_16K_SAMPLES;
+  adc_cfg.i2s_iface.bits    = AUDIO_HAL_BIT_LENGTH_16BITS;
+
+  esp_err_t rv = es7210_adc_init(&Wire, &adc_cfg);
+  rv |= es7210_adc_config_i2s(adc_cfg.codec_mode, &adc_cfg.i2s_iface);
+  // MIC1 + MIC2 are the dual mic array on this board. Push to max gain
+  // (37.5 dB) — Waveshare's reference example uses the same. Distortion is
+  // easier to diagnose than silence; we can dial back later if voice clips.
+  rv |= es7210_adc_set_gain(
+      (es7210_input_mics_t)(ES7210_INPUT_MIC1 | ES7210_INPUT_MIC2),
+      (es7210_gain_value_t)GAIN_37_5DB);
+  // MIC3/4 are reserved for AEC loopback (future); leave at 0 dB.
+  rv |= es7210_adc_set_gain(
+      (es7210_input_mics_t)(ES7210_INPUT_MIC3 | ES7210_INPUT_MIC4),
+      (es7210_gain_value_t)GAIN_0DB);
+  rv |= es7210_adc_ctrl_state(adc_cfg.codec_mode, AUDIO_HAL_CTRL_START);
+  s_es7210_ready = (rv == ESP_OK);
+  LOG_I(TAG, "ES7210 init: %s", s_es7210_ready ? "ok" : "FAILED");
+
   s_ok = true;
   LOG_I(TAG, "ES8311 + I2S up @ %lu Hz", (unsigned long)sample_rate);
   return true;
 }
+
+// ---- I2S mode switching ----------------------------------------------------
+// We can't have both ES8311 (playback) and ES7210 (capture) drive the I2S bus
+// at the same time — they share BCLK + WS on this board. So we toggle the
+// MCLK pin (and reinit ESP_I2S) between the two chips when switching modes.
+// ES8311 MCLK = GPIO 42; ES7210 MCLK = GPIO 16.
+namespace {
+void enter_capture_mode() {
+  if (s_capture_mode) return;
+  s_i2s.end();
+  s_i2s.setPins(robimon::board::I2S_BCLK, robimon::board::I2S_WS,
+                robimon::board::I2S_DOUT, robimon::board::I2S_DIN,
+                ES7210_MCLK_PIN);
+  s_i2s.begin(I2S_MODE_STD, s_sample_rate, I2S_DATA_BIT_WIDTH_16BIT,
+              I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+  s_capture_mode = true;
+}
+
+void exit_capture_mode() {
+  if (!s_capture_mode) return;
+  s_i2s.end();
+  s_i2s.setPins(robimon::board::I2S_BCLK, robimon::board::I2S_WS,
+                robimon::board::I2S_DOUT, robimon::board::I2S_DIN,
+                robimon::board::I2S_MCLK);
+  s_i2s.begin(I2S_MODE_STD, s_sample_rate, I2S_DATA_BIT_WIDTH_16BIT,
+              I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+  s_capture_mode = false;
+}
+}  // namespace
 
 void set_volume_percent(uint8_t percent) {
   if (!s_ok) return;
@@ -128,20 +193,25 @@ size_t play(const int16_t* samples, size_t count) {
 
 size_t capture(int16_t* samples, size_t max_count) {
   if (!s_ok || !samples || max_count == 0) return 0;
-  // Read stereo and keep just the left channel (the analog mic feeds L on this codec config).
-  static constexpr size_t CHUNK = 256;
-  int16_t stereo[CHUNK * 2];
+
+  enter_capture_mode();
+
+  // ES7210 with MIC1 + MIC2 produces stereo I2S frames (MIC1 on left,
+  // MIC2 on right); we keep just MIC1.
+  static constexpr size_t CHUNK_FRAMES = 256;
+  int16_t stereo[CHUNK_FRAMES * 2];
   size_t got = 0;
   while (got < max_count) {
-    const size_t want = (max_count - got) > CHUNK ? CHUNK : (max_count - got);
-    // ESP_I2S exposes readBytes(char*, size_t) for bulk reads; the bare
-    // read() returns a single byte and isn't what we want here.
-    const size_t bytes = s_i2s.readBytes((char*)stereo, want * 4);
+    const size_t want_frames = (max_count - got) > CHUNK_FRAMES
+                                ? CHUNK_FRAMES : (max_count - got);
+    const size_t bytes = s_i2s.readBytes((char*)stereo, want_frames * 4);
     if (bytes == 0) break;
     const size_t frames = bytes / 4;
     for (size_t i = 0; i < frames; ++i) samples[got + i] = stereo[i * 2 + 0];
     got += frames;
   }
+
+  exit_capture_mode();
   return got;
 }
 
@@ -235,6 +305,47 @@ void stop_alarm() {
 }
 
 bool alarm_is_playing() { return s_alarm_running.load(); }
+
+void play_listen_cue() {
+  if (!s_ok) return;
+
+  // Two-stage chirp (low → high) so it reads as "go now" rather than a
+  // single ambiguous blip. NS4150B soft-start needs ~15-20 ms before the
+  // first sample lands cleanly, and ESP_I2S write returns once samples are
+  // queued in DMA — not when they've finished playing — so we drain
+  // generously after the last tone.
+  constexpr uint32_t lo_hz     = 800;
+  constexpr uint32_t hi_hz     = 1200;
+  constexpr uint32_t tone_ms   = 90;
+  constexpr float    amplitude = 0.85f;
+
+  const size_t samples = (size_t)((uint64_t)s_sample_rate * tone_ms / 1000UL);
+  int16_t* lo_buf = (int16_t*)malloc(samples * sizeof(int16_t));
+  int16_t* hi_buf = (int16_t*)malloc(samples * sizeof(int16_t));
+  if (!lo_buf || !hi_buf) {
+    if (lo_buf) free(lo_buf);
+    if (hi_buf) free(hi_buf);
+    return;
+  }
+  generate_tone(lo_buf, lo_hz, tone_ms, amplitude);
+  generate_tone(hi_buf, hi_hz, tone_ms, amplitude);
+
+  int saved_vol = 0;
+  es8311_voice_volume_get(s_codec, &saved_vol);
+  int set_to = 0;
+  es8311_voice_volume_set(s_codec, MAX_VOLUME_PERCENT, &set_to);
+
+  enable_amp(true);
+  delay(25);                 // amp soft-start
+  play(lo_buf, samples);
+  play(hi_buf, samples);
+  delay(tone_ms + 60);       // drain DMA before muting amp
+  enable_amp(false);
+
+  es8311_voice_volume_set(s_codec, saved_vol, &set_to);
+  free(lo_buf);
+  free(hi_buf);
+}
 
 void play_test_tone() {
   if (!s_ok) return;
