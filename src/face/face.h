@@ -78,4 +78,9 @@ void flash_eyes(uint32_t duration_ms = 120);
 // speak. Pass 0 to clear.
 void start_listening_ring(uint32_t window_ms);
 
+// Caption shown above the eyes for `duration_ms`. Used by the voice flow
+// to surface the STT transcript ("you said: ...") so the kid can see what
+// Robimon understood. Truncates anything beyond an internal cap.
+void set_caption(const char* text, uint32_t duration_ms = 4000);
+
 }  // namespace robimon::face

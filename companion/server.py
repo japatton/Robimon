@@ -210,8 +210,23 @@ def chat():
         log.error("tts error: %s", e)
         return "tts_error", 502
 
+    # Header-safe sanitisation: strip non-printable + a couple of HTTP-
+    # special characters (", \\), squash whitespace, truncate. The device
+    # reads these as-is (no URL decode), so anything weird here would
+    # otherwise corrupt the HTTP framing or render as gibberish on screen.
+    def header_safe(s: str, limit: int) -> str:
+        s = s.replace("\r", " ").replace("\n", " ")
+        s = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else " " for c in s)
+        s = " ".join(s.split())
+        return s[:limit]
+
     headers = {
         "Content-Type":         "audio/wav",
+        # Plain printable ASCII. Heard = STT transcript (kid's voice);
+        # Said = LLM response (Robimon's reply).
+        "X-Robimon-Heard":      header_safe(text,     80),
+        "X-Robimon-Said":       header_safe(response, 80),
+        # Keep the URL-encoded variants too for any older client.
         "X-Robimon-Transcript": urllib.parse.quote(text[:200]),
         "X-Robimon-Response":   urllib.parse.quote(response[:500]),
     }

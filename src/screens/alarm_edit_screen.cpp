@@ -32,13 +32,17 @@ constexpr int TIME_DIGIT_W   = 60;          // approx visual width of "HH" at Te
 constexpr int TIME_GAP       = 8;
 constexpr int TIME_COLON_W   = 16;
 
-// Days row
+// Days row — 7 day buttons + an "every day" pill on the right that
+// disambiguates "every day" (mask=0) from "all 7 individually selected"
+// (mask=0x7F). Tapping the pill always clears to mask=0.
 constexpr int DAY_Y          = 110;
 constexpr int DAY_BTN_W      = 32;
 constexpr int DAY_BTN_H      = 32;
 constexpr int DAY_GAP        = 6;
-constexpr int DAY_TOTAL      = 7 * DAY_BTN_W + 6 * DAY_GAP;
+constexpr int DAY_ALL_W      = 60;            // "every" pill
+constexpr int DAY_TOTAL      = 7 * DAY_BTN_W + 6 * DAY_GAP + DAY_GAP + DAY_ALL_W;
 constexpr int DAY_X0         = (CW - DAY_TOTAL) / 2;
+constexpr int DAY_ALL_X      = DAY_X0 + 7 * DAY_BTN_W + 6 * DAY_GAP + DAY_GAP;
 constexpr char DAY_LETTERS[7] = { 'S', 'M', 'T', 'W', 'T', 'F', 'S' };
 
 // Expression row
@@ -137,13 +141,17 @@ void AlarmEditScreen::render() {
   g->print(b);
 
   // ---- Days row ------------------------------------------------------------
+  // "every day" mode (mask == 0) renders the 7 day buttons as outlines
+  // (no fill) and lights up the "every" pill instead. That way the kid can
+  // see the difference between "every day, always" and "I picked all 7
+  // boxes individually" at a glance.
+  const bool every_mode = (staging_.days_mask == 0);
   for (int i = 0; i < 7; ++i) {
     const int x = DAY_X0 + i * (DAY_BTN_W + DAY_GAP);
-    const bool on = (staging_.days_mask & (1 << i)) ||
-                     (staging_.days_mask == 0);   // "every day" highlights all
-    const uint16_t color = on ? COLOR_FG : COLOR_DIM;
+    const bool selected = (staging_.days_mask & (1 << i)) != 0;
+    const uint16_t color = (selected || every_mode) ? COLOR_FG : COLOR_DIM;
     g->drawRoundRect(x, DAY_Y, DAY_BTN_W, DAY_BTN_H, 4, color);
-    if (on) {
+    if (selected) {
       g->fillRoundRect(x + 4, DAY_Y + 4, DAY_BTN_W - 8, DAY_BTN_H - 8, 3, color);
       g->setTextColor(COLOR_BG);
     } else {
@@ -154,6 +162,22 @@ void AlarmEditScreen::render() {
     g->setCursor(x + DAY_BTN_W / 2 - 6, DAY_Y + DAY_BTN_H / 2 - 8);
     g->print(letter);
   }
+
+  // "every day" pill at the right of the day row.
+  const uint16_t all_color = every_mode ? COLOR_FG : COLOR_DIM;
+  g->drawRoundRect(DAY_ALL_X,     DAY_Y,     DAY_ALL_W,     DAY_BTN_H,     6, all_color);
+  g->drawRoundRect(DAY_ALL_X + 1, DAY_Y + 1, DAY_ALL_W - 2, DAY_BTN_H - 2, 5, all_color);
+  if (every_mode) {
+    g->fillRoundRect(DAY_ALL_X + 4, DAY_Y + 4, DAY_ALL_W - 8, DAY_BTN_H - 8, 4, all_color);
+    g->setTextColor(COLOR_BG);
+  } else {
+    g->setTextColor(all_color);
+  }
+  g->setTextSize(2);
+  const char* all_lbl = "every";
+  g->setCursor(DAY_ALL_X + DAY_ALL_W / 2 - (int)strlen(all_lbl) * 6,
+               DAY_Y + DAY_BTN_H / 2 - 8);
+  g->print(all_lbl);
 
   // ---- Expression row ------------------------------------------------------
   const int expr_total = EXPR_BTN_W + 6 + EXPR_BOX_W + 6 + EXPR_BTN_W;
@@ -215,16 +239,25 @@ void AlarmEditScreen::on_tap(int panel_x, int panel_y) {
     }
   }
 
-  // Days row
+  // Days row + "every day" pill
   if (canvas_y >= DAY_Y && canvas_y < DAY_Y + DAY_BTN_H) {
+    // "every day" pill — tap clears mask back to 0 (every day).
+    if (panel_x >= DAY_ALL_X && panel_x < DAY_ALL_X + DAY_ALL_W) {
+      staging_.days_mask = 0;
+      dirty_ = true;
+      return;
+    }
     for (int i = 0; i < 7; ++i) {
       const int x = DAY_X0 + i * (DAY_BTN_W + DAY_GAP);
       if (panel_x >= x && panel_x < x + DAY_BTN_W) {
-        // If days_mask was 0 ("every day"), interpret tap as "select only this day".
-        if (staging_.days_mask == 0) staging_.days_mask = 0x7F;
-        staging_.days_mask ^= (1 << i);
-        // If the user clears all days, fall back to "every day".
-        if ((staging_.days_mask & 0x7F) == 0) staging_.days_mask = 0;
+        // From "every day" mode, a single-day tap means "only this day".
+        if (staging_.days_mask == 0) {
+          staging_.days_mask = (1 << i);
+        } else {
+          staging_.days_mask ^= (1 << i);
+          // Clearing the last selected day falls back to "every day".
+          if ((staging_.days_mask & 0x7F) == 0) staging_.days_mask = 0;
+        }
         dirty_ = true;
         return;
       }

@@ -45,6 +45,9 @@ void cmd_help() {
   Serial.println("  list                          known keys");
   Serial.println("  ha-reconnect                  retry HA WS with current creds");
   Serial.println("  status                        wifi + ha status");
+  Serial.println("  pin-reset                     reset PIN to default (0000) — lockout escape");
+  Serial.println("  force-setup                   enter setup mode on next boot");
+  Serial.println("  factory-reset                 wipe all saved config + reboot into setup");
 }
 
 void cmd_list() {
@@ -105,6 +108,42 @@ void cmd_status() {
                 ha_client::url());
 }
 
+void cmd_pin_reset() {
+  // Wipes the stored PIN hash + salt. config_store::pin_check() falls back
+  // to the literal default ("0000") when no salt is set, so this is the
+  // documented escape hatch for a forgotten PIN.
+  config::set_string("pin_h", "");
+  config::set_string("pin_s", "");
+  Serial.println("ok: PIN reset — default is 0000");
+}
+
+void cmd_force_setup() {
+  // One-shot flag picked up by main.cpp on the next boot — enters the
+  // captive-portal setup flow regardless of whether 'configured' is set.
+  config::set_uint("force_setup", 1);
+  Serial.println("ok: setup mode armed for next boot — type 'reboot' to apply");
+}
+
+void cmd_factory_reset() {
+  // Clears every key the device cares about and arms setup mode. Doesn't
+  // touch alarms_blob — those are unlikely to be the cause of a lockout,
+  // and the alarm screen is read-only without PIN access anyway.
+  const char* keys[] = {
+    "wifi_ssid", "wifi_pass", "tz_posix",
+    "ha_url", "ha_token", "ha_entity",
+    "voice_url", "voice_model", "voice_prompt",
+    "pin_h", "pin_s",
+    "disp_b", "disp_dim_s", "disp_slp_s",
+    nullptr,
+  };
+  for (int i = 0; keys[i]; ++i) config::set_string(keys[i], "");
+  config::set_uint("configured", 0);
+  config::set_uint("force_setup", 1);
+  Serial.println("ok: factory reset — rebooting into setup");
+  delay(500);
+  ESP.restart();
+}
+
 void execute_line(char* line) {
   while (*line == ' ' || *line == '\t') line++;
   if (!*line) return;
@@ -112,13 +151,17 @@ void execute_line(char* line) {
   const char *cmd, *rest;
   split_first(line, &cmd, &rest);
 
-  if      (strcmp(cmd, "help") == 0)         cmd_help();
-  else if (strcmp(cmd, "list") == 0)         cmd_list();
-  else if (strcmp(cmd, "set") == 0)          cmd_set((char*)rest);
-  else if (strcmp(cmd, "get") == 0)          cmd_get((char*)rest);
-  else if (strcmp(cmd, "forget") == 0)       cmd_forget((char*)rest);
-  else if (strcmp(cmd, "ha-reconnect") == 0) { Serial.println("(reconnecting HA)"); ha_client::auto_connect(); }
-  else if (strcmp(cmd, "status") == 0)       cmd_status();
+  if      (strcmp(cmd, "help") == 0)          cmd_help();
+  else if (strcmp(cmd, "list") == 0)          cmd_list();
+  else if (strcmp(cmd, "set") == 0)           cmd_set((char*)rest);
+  else if (strcmp(cmd, "get") == 0)           cmd_get((char*)rest);
+  else if (strcmp(cmd, "forget") == 0)        cmd_forget((char*)rest);
+  else if (strcmp(cmd, "ha-reconnect") == 0)  { Serial.println("(reconnecting HA)"); ha_client::auto_connect(); }
+  else if (strcmp(cmd, "status") == 0)        cmd_status();
+  else if (strcmp(cmd, "pin-reset") == 0)     cmd_pin_reset();
+  else if (strcmp(cmd, "force-setup") == 0)   cmd_force_setup();
+  else if (strcmp(cmd, "factory-reset") == 0) cmd_factory_reset();
+  else if (strcmp(cmd, "reboot") == 0)        { Serial.println("rebooting…"); delay(200); ESP.restart(); }
   else { Serial.printf("unknown: %s (try 'help')\n", cmd); }
 }
 

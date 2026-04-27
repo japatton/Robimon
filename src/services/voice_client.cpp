@@ -259,12 +259,22 @@ void voice_task(void*) {
     if (model[0])  http.addHeader("X-Robimon-Model",         model);
     if (prompt[0]) http.addHeader("X-Robimon-System-Prompt", prompt);
 
+    // Ask HTTPClient to retain the X-Robimon-Heard header on the response
+    // so we can render it as a caption ("you said: ...") below.
+    static const char* kept_headers[] = { "X-Robimon-Heard" };
+    http.collectHeaders(kept_headers, 1);
+
     esp_task_wdt_reset();
     const int code = http.POST(s_request_buf, REQUEST_BYTES);
     esp_task_wdt_reset();
     LOG_I(TAG, "POST -> %d", code);
 
-    if (code == 204) { http.end(); task_exit(State::ERROR_NO_SPEECH); return; }
+    if (code == 204) {
+      // No-speech reply — surface it on the face so the kid knows
+      // Robimon was listening but didn't catch a word.
+      face::set_caption("didn't catch that", 2500);
+      http.end(); task_exit(State::ERROR_NO_SPEECH); return;
+    }
     if (code != 200) { http.end(); task_exit(State::ERROR_NETWORK);   return; }
 
     const int content_len = http.getSize();
@@ -318,6 +328,19 @@ void voice_task(void*) {
       LOG_W(TAG, "resampler overflow (src %u @ %u Hz)",
             (unsigned)src_count, (unsigned)resp_rate);
       task_exit(State::ERROR_OTHER); return;
+    }
+
+    // Caption: surface the STT transcript as "you said: ..." above the
+    // eyes during playback. Header is server-side ASCII-sanitized so we
+    // can drop it straight into the face render. Missing header (older
+    // companion image) is a graceful no-op.
+    {
+      const String heard = http.header("X-Robimon-Heard");
+      if (heard.length() > 0) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "you said: %s", heard.c_str());
+        face::set_caption(buf, /*duration_ms=*/4000);
+      }
     }
 
     set_state(State::PLAYING);

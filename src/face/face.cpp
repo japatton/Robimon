@@ -308,6 +308,12 @@ uint32_t    s_eye_flash_until_ms    = 0;
 uint32_t    s_listen_ring_start_ms  = 0;
 uint32_t    s_listen_ring_window_ms = 0;
 
+// Caption above the eyes — used to surface the STT transcript so the kid
+// can see what Robimon heard.
+constexpr size_t CAPTION_MAX = 64;
+char        s_caption[CAPTION_MAX + 1] = {0};
+uint32_t    s_caption_until_ms = 0;
+
 // (Double-tap detection lives in the gesture detector now — it emits a
 // DOUBLE_TAP event after a TAP when a quick second tap follows. main.cpp
 // translates that into face::dismiss_menu() + voice::start(). Keeping the
@@ -487,9 +493,46 @@ void draw_robot_mouth(Arduino_GFX* g) {
   }
 }
 
+void draw_caption(Arduino_GFX* g) {
+  if (millis() >= s_caption_until_ms || s_caption[0] == '\0') return;
+  // Caption sits in the empty band above the eyes (eyes start ~y=120).
+  // TextSize 2 = 12-px-tall chars; word-wraps onto a second line if the
+  // first runs past the canvas. Cyan-on-black for legibility.
+  constexpr int CAPTION_Y         = 22;
+  constexpr int CAPTION_LINE_H    = 18;
+  constexpr int CAPTION_CHARS_LINE = 36;   // safe width @ size 2 on 466 px canvas
+  g->setTextSize(2);
+  g->setTextColor(COLOR_EYE);
+
+  const int cx = g->width() / 2;
+  const int len = (int)strlen(s_caption);
+  if (len <= CAPTION_CHARS_LINE) {
+    g->setCursor(cx - len * 6, CAPTION_Y + CAPTION_LINE_H / 2);
+    g->print(s_caption);
+    return;
+  }
+  // Find a space near the wrap point so we don't break mid-word.
+  int split = CAPTION_CHARS_LINE;
+  for (int i = CAPTION_CHARS_LINE; i > CAPTION_CHARS_LINE - 12 && i > 0; --i) {
+    if (s_caption[i] == ' ') { split = i; break; }
+  }
+  char line1[CAPTION_MAX + 1];
+  memcpy(line1, s_caption, split);
+  line1[split] = '\0';
+  const char* line2 = s_caption[split] == ' ' ? &s_caption[split + 1]
+                                              : &s_caption[split];
+  const int l1n = (int)strlen(line1);
+  const int l2n = (int)strlen(line2);
+  g->setCursor(cx - l1n * 6, CAPTION_Y);
+  g->print(line1);
+  g->setCursor(cx - l2n * 6, CAPTION_Y + CAPTION_LINE_H);
+  g->print(line2);
+}
+
 void render_face(const FaceParams& p) {
   Arduino_GFX* g = robimon::hal::display::gfx();
   g->fillRect(0, 0, g->width(), FACE_DRAW_BOTTOM, COLOR_BG);
+  draw_caption(g);
 
   const int wl = (int)(EYE_W_BASE * p.left.scale);
   const int hl = (int)(EYE_H_BASE * p.left.scale);
@@ -745,6 +788,17 @@ void flash_eyes(uint32_t duration_ms) {
 void start_listening_ring(uint32_t window_ms) {
   s_listen_ring_start_ms  = millis();
   s_listen_ring_window_ms = window_ms;
+}
+
+void set_caption(const char* text, uint32_t duration_ms) {
+  if (!text || !text[0]) {
+    s_caption[0] = '\0';
+    s_caption_until_ms = 0;
+    return;
+  }
+  strncpy(s_caption, text, CAPTION_MAX);
+  s_caption[CAPTION_MAX] = '\0';
+  s_caption_until_ms = millis() + duration_ms;
 }
 
 void enable_demo_cycle(bool on) {
