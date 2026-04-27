@@ -1,0 +1,59 @@
+# Builds the Robimon companion Docker image and pushes it to GHCR
+# (ghcr.io/japatton/robimon-companion) on every push to main that touches
+# the companion/ directory or this workflow file.
+#
+# After the first successful run, your Portainer compose can reference:
+#   image: ghcr.io/japatton/robimon-companion:latest
+#
+# By default GHCR packages inherit the source repo's visibility. For a
+# private Robimon repo, the image will also be private — your Portainer
+# host will need a GHCR docker login (Settings → Developer settings →
+# Personal access tokens with read:packages, then `docker login ghcr.io`
+# on the host). To skip auth on the host, make the package public:
+#   github.com/users/japatton/packages/container/robimon-companion → settings
+#   → Change visibility → Public.
+
+name: build-companion-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'companion/**'
+      - '.github/workflows/companion-image.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/japatton/robimon-companion
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./companion
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
