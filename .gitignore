@@ -20,3 +20,6 @@ secrets.h
 
 # Claude Code per-project memory (local-only, not source-controlled)
 memory/
+
+# Claude per-task worktrees (transient)
+.claude/
