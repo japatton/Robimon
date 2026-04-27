@@ -309,23 +309,17 @@ bool alarm_is_playing() { return s_alarm_running.load(); }
 
 // Static buffers — listen cue is invoked from voice_task; avoids
 // per-call mallocs on a path that runs every voice interaction.
+// The short-chirp pair (lo + hi) is reused for the listen cue, the
+// success accent, and the gentle-fail cue with different freqs.
 constexpr uint32_t CUE_TONE_MS    = 90;
 constexpr size_t   CUE_TONE_SAMPS = (size_t)(16000 * CUE_TONE_MS / 1000);
 static int16_t s_cue_lo[CUE_TONE_SAMPS];
 static int16_t s_cue_hi[CUE_TONE_SAMPS];
 
-void play_listen_cue() {
+// Generic two-tone playback helper. Saves a bunch of duplication across
+// the three cue variants. Blocks for ~ (2 * tone_ms + 80) ms.
+void play_two_tone(uint32_t lo_hz, uint32_t hi_hz, float amplitude) {
   if (!s_ok) return;
-
-  // Two-stage chirp (low → high) so it reads as "go now" rather than a
-  // single ambiguous blip. NS4150B soft-start needs ~15-20 ms before the
-  // first sample lands cleanly, and ESP_I2S write returns once samples are
-  // queued in DMA — not when they've finished playing — so we drain
-  // generously after the last tone.
-  constexpr uint32_t lo_hz     = 800;
-  constexpr uint32_t hi_hz     = 1200;
-  constexpr float    amplitude = 0.85f;
-
   const size_t samples = (size_t)((uint64_t)s_sample_rate * CUE_TONE_MS / 1000UL);
   const size_t use_samples = samples > CUE_TONE_SAMPS ? CUE_TONE_SAMPS : samples;
   generate_tone(s_cue_lo, lo_hz, CUE_TONE_MS, amplitude);
@@ -345,6 +339,10 @@ void play_listen_cue() {
 
   es8311_voice_volume_set(s_codec, saved_vol, &set_to);
 }
+
+void play_listen_cue() { play_two_tone(800, 1200, 0.85f); }
+void play_success()    { play_two_tone(600, 1000, 0.75f); }
+void play_oops()       { play_two_tone(700,  500, 0.65f); }
 
 // Static buffer for the boot test tone — 16 kHz × 500 ms = 16 KB.
 constexpr uint32_t TEST_TONE_MS    = 500;

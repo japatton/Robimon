@@ -31,9 +31,22 @@ constexpr int DOT_BAND_Y       = 304;     // canvas-local y for the indicator ba
 constexpr int DOT_BAND_H       = 12;
 constexpr int DOT_RADIUS       = 3;
 constexpr int DOT_GAP          = 14;      // spacing between dot centers
-constexpr uint16_t DOT_COLOR_ON  = 0x055F;   // bright cyan
-constexpr uint16_t DOT_COLOR_OFF = 0x01F6;   // dim cyan
-constexpr uint16_t DOT_COLOR_BG  = 0x0000;
+constexpr uint16_t COLOR_FG      = 0x055F;   // bright cyan
+constexpr uint16_t COLOR_DIM     = 0x01F6;   // dim cyan
+constexpr uint16_t COLOR_BG      = 0x0000;
+constexpr uint16_t DOT_COLOR_ON  = COLOR_FG;
+constexpr uint16_t DOT_COLOR_OFF = COLOR_DIM;
+constexpr uint16_t DOT_COLOR_BG  = COLOR_BG;
+
+// Caption overlay (top of canvas, above any screen content). Rendered after
+// the screen flushes so it persists across swipes and modals.
+constexpr int CAPTION_BAND_Y     = 6;
+constexpr int CAPTION_BAND_H     = 36;
+constexpr int CAPTION_LINE_H     = 18;
+constexpr int CAPTION_CHARS_LINE = 36;       // safe width @ size 2 on 466 px canvas
+constexpr size_t CAPTION_MAX     = 64;
+char     s_caption[CAPTION_MAX + 1] = {0};
+uint32_t s_caption_until_ms = 0;
 
 void draw_carousel_dots() {
   if (s_count <= 1 || s_modal_count > 0) return;
@@ -55,6 +68,60 @@ void draw_carousel_dots() {
     }
   }
   ::robimon::hal::display::flush_band(DOT_BAND_Y, DOT_BAND_H);
+}
+
+void draw_caption_overlay() {
+  // Track the last-rendered caption so we can do a one-time clear when it
+  // expires — otherwise stale text would linger forever (the screens'
+  // clear_screen_area() leaves the overlay bands alone).
+  static bool s_last_active = false;
+  const bool active = (s_caption[0] != '\0' && millis() < s_caption_until_ms);
+
+  if (!active) {
+    if (s_last_active) {
+      Arduino_GFX* g = ::robimon::hal::display::gfx();
+      if (g) {
+        g->fillRect(0, CAPTION_BAND_Y, g->width(), CAPTION_BAND_H, COLOR_BG);
+        ::robimon::hal::display::flush_band(CAPTION_BAND_Y, CAPTION_BAND_H);
+      }
+      s_last_active = false;
+    }
+    return;
+  }
+  s_last_active = true;
+
+  Arduino_GFX* g = ::robimon::hal::display::gfx();
+  if (!g) return;
+  g->fillRect(0, CAPTION_BAND_Y, g->width(), CAPTION_BAND_H, COLOR_BG);
+
+  g->setTextSize(2);
+  g->setTextColor(COLOR_FG);
+  const int cx  = g->width() / 2;
+  const int len = (int)strlen(s_caption);
+
+  if (len <= CAPTION_CHARS_LINE) {
+    g->setCursor(cx - len * 6, CAPTION_BAND_Y + CAPTION_LINE_H / 2);
+    g->print(s_caption);
+  } else {
+    // Wrap on the nearest space within ~12 chars of the soft limit so we
+    // don't break a word.
+    int split = CAPTION_CHARS_LINE;
+    for (int i = CAPTION_CHARS_LINE; i > CAPTION_CHARS_LINE - 12 && i > 0; --i) {
+      if (s_caption[i] == ' ') { split = i; break; }
+    }
+    char line1[CAPTION_MAX + 1];
+    memcpy(line1, s_caption, split);
+    line1[split] = '\0';
+    const char* line2 = (s_caption[split] == ' ') ? &s_caption[split + 1]
+                                                  : &s_caption[split];
+    const int l1n = (int)strlen(line1);
+    const int l2n = (int)strlen(line2);
+    g->setCursor(cx - l1n * 6, CAPTION_BAND_Y);
+    g->print(line1);
+    g->setCursor(cx - l2n * 6, CAPTION_BAND_Y + CAPTION_LINE_H);
+    g->print(line2);
+  }
+  ::robimon::hal::display::flush_band(CAPTION_BAND_Y, CAPTION_BAND_H);
 }
 
 }  // namespace
@@ -85,6 +152,18 @@ void set_index(int idx) {
   if (s_initial_appear_done && s_screens[s_current]) {
     s_screens[s_current]->on_disappear();
   }
+
+  // Wipe the canvas before the new screen renders. The face renderer
+  // intentionally leaves the caption + dot bands alone (to avoid 30-FPS
+  // flicker against the overlays), so without this, anything the
+  // previous screen drew at the top or bottom of the canvas — or
+  // anywhere the new screen doesn't fully overdraw — survives the swap.
+  // fillScreen is just a framebuffer memset (no QSPI), so this is cheap.
+  // Active caption + dots will be re-rendered by their overlays this
+  // same frame.
+  Arduino_GFX* g = ::robimon::hal::display::gfx();
+  if (g) g->fillScreen(COLOR_BG);
+
   s_current = idx;
   s_initial_appear_done = true;
   if (s_screens[s_current]) {
@@ -133,9 +212,22 @@ void update(uint32_t now_ms) {
   }
   Screen* a = active();
   if (a) a->update(now_ms);
-  // Overlay carousel page dots after the screen renders. This is a 12-px
-  // band with its own partial flush, so it costs ~1/26 of a full flush.
+  // Overlays after the screen renders — caption (top band) and carousel
+  // dots (bottom band). Each is its own partial flush, well under 1/26th
+  // of a full flush per overlay.
+  draw_caption_overlay();
   draw_carousel_dots();
+}
+
+void set_caption(const char* text, uint32_t duration_ms) {
+  if (!text || !text[0]) {
+    s_caption[0] = '\0';
+    s_caption_until_ms = 0;
+    return;
+  }
+  strncpy(s_caption, text, CAPTION_MAX);
+  s_caption[CAPTION_MAX] = '\0';
+  s_caption_until_ms = millis() + duration_ms;
 }
 
 void on_tap(int panel_x, int panel_y) {

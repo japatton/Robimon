@@ -48,6 +48,7 @@
 #include "services/serial_console.h"
 #include "services/setup_portal.h"
 #include "services/voice_client.h"
+#include "services/tutorial.h"
 #include "screens/setup_screen.h"
 #include "app/log.h"
 #include "app/stats.h"
@@ -66,9 +67,26 @@ uint32_t s_last_activity_ms = 0;
 struct MotionWatch {
   float    mean_g  = 1.0f;     // gravity baseline
   uint32_t last_check_ms = 0;
+  uint32_t last_react_ms = 0;
 } s_motion;
-constexpr float    MOTION_THRESHOLD_G = 0.20f;
-constexpr uint32_t MOTION_CHECK_MS    = 100;
+constexpr float    MOTION_THRESHOLD_G  = 0.20f;
+constexpr uint32_t MOTION_CHECK_MS     = 100;
+constexpr uint32_t PICKUP_REACT_COOLDOWN_MS = 5000;   // throttle "whoa!" to ~once per 5s
+
+// Boot-greeting state. Shown once per power-on, after NTP sync (or after
+// a short grace period if SNTP doesn't come up).
+bool     s_greeted = false;
+uint32_t s_greet_grace_until_ms = 0;
+
+// Screen-time awareness. Tracks one continuous-active "session" — kid
+// picks up Robimon, plays for a while, eventually gets a gentle "take a
+// break?" prompt. Session ends after IDLE_RESET_MS of no activity; next
+// activity starts a new session. Daily limits / bedtime are deferred —
+// this is the minimum that pays off for parent trust.
+uint32_t s_session_start_ms      = 0;
+bool     s_break_prompted        = false;
+constexpr uint32_t SESSION_PROMPT_MS    = 30UL * 60UL * 1000UL;   // 30 min
+constexpr uint32_t SESSION_IDLE_RESET_MS = 5UL * 60UL * 1000UL;    //  5 min
 }
 
 namespace {
@@ -203,6 +221,17 @@ void setup() {
   // user has a chance to interact.
   s_last_activity_ms = millis();
 
+  // First-boot tutorial — runs once per device unless replay()'d. The
+  // tutorial is purely observational: it watches the existing event
+  // dispatch and advances its caption when the user does the right
+  // gesture.
+  robimon::services::tutorial::begin();
+
+  // Boot greeting will fire once SNTP syncs (so we can pick a time-of-day
+  // greeting) or after a 6 s grace window if it doesn't. Skipped if the
+  // tutorial is still running — that takes precedence.
+  s_greet_grace_until_ms = millis() + 6000;
+
 #if defined(ROBIMON_BOOT_TEST_TONE) && (ROBIMON_BOOT_TEST_TONE == 1)
   if (robimon::hal::audio::ok()) {
     LOG_I(TAG, "playing boot test tone");
@@ -261,10 +290,64 @@ void loop() {
                                                  : s_motion.mean_g - mag;
       if (delta > MOTION_THRESHOLD_G) {
         s_last_activity_ms = now_ms;
+
+        // Pickup react: brief "whoa!" caption + surprised face. Throttled
+        // and gated so we don't fire mid-conversation, mid-alarm, during
+        // the tutorial intro, or while a finger is on the screen (an
+        // active swipe registers as motion too).
+        const bool busy = robimon::services::voice::state() != robimon::services::voice::State::IDLE
+                       || robimon::services::alarm_mgr::any_firing()
+                       || robimon::services::tutorial::is_active()
+                       || n > 0;
+        if (!busy && (now_ms - s_motion.last_react_ms) > PICKUP_REACT_COOLDOWN_MS) {
+          s_motion.last_react_ms = now_ms;
+          robimon::face::set_expression(robimon::face::Expression::SURPRISED, 200);
+          robimon::ui::screen_mgr::set_caption("whoa!", 1500);
+        }
       }
       // Slow exponential mean — recovers gravity baseline after orientation
       // changes without making the threshold trip on slow re-orientation.
       s_motion.mean_g = s_motion.mean_g * 0.95f + mag * 0.05f;
+    }
+  }
+
+  // Screen-time session tracking — see the comment on s_session_start_ms.
+  // The session reset window matches the auto-dim timer so "screen blanked"
+  // implicitly ends a session.
+  const uint32_t idle_for = now_ms - s_last_activity_ms;
+  if (idle_for >= SESSION_IDLE_RESET_MS) {
+    s_session_start_ms = 0;
+    s_break_prompted   = false;
+  } else if (s_session_start_ms == 0) {
+    s_session_start_ms = now_ms;
+  }
+  if (!s_break_prompted && s_session_start_ms != 0
+      && (now_ms - s_session_start_ms) >= SESSION_PROMPT_MS) {
+    s_break_prompted = true;
+    robimon::face::set_expression(robimon::face::Expression::HAPPY, 250);
+    robimon::ui::screen_mgr::set_caption("take a break?", 5000);
+    LOG_I(TAG, "30-min session reached — break prompt shown");
+  }
+
+  // Boot greeting — fires once per power-on, after SNTP syncs or after a
+  // grace window. Suppressed while the tutorial is running.
+  if (!s_greeted && !robimon::services::tutorial::is_active()) {
+    const bool synced = robimon::services::time_svc::is_synced();
+    if (synced || now_ms >= s_greet_grace_until_ms) {
+      s_greeted = true;
+      const char* msg = "hi!";
+      if (synced) {
+        struct tm lt;
+        if (robimon::services::time_svc::get_local_time(&lt)) {
+          const int h = lt.tm_hour;
+          if      (h >=  5 && h < 12) msg = "good morning!";
+          else if (h >= 12 && h < 17) msg = "afternoon!";
+          else if (h >= 17 && h < 21) msg = "evening!";
+          else                         msg = "shouldn't you be in bed?";
+        }
+      }
+      robimon::face::set_expression(robimon::face::Expression::HAPPY, 250);
+      robimon::ui::screen_mgr::set_caption(msg, 3000);
     }
   }
 
@@ -307,6 +390,7 @@ void loop() {
       } else if (robimon::ui::screen_mgr::modal_depth() == 0) {
         LOG_I(TAG, "long-press -> PIN pad");
         robimon::ui::screen_mgr::push_modal(&robimon::screens::pin_pad_screen);
+        robimon::services::tutorial::on_long_press();
       }
       break;
     case robimon::ui::gestures::Event::SWIPE_LEFT:
@@ -319,6 +403,7 @@ void loop() {
           robimon::ui::screen_mgr::next();
         else
           robimon::ui::screen_mgr::prev();
+        robimon::services::tutorial::on_swipe();
       }
       break;
     default:
@@ -331,6 +416,7 @@ void loop() {
   robimon::services::ha_client::update(millis());
   robimon::services::voice::update(millis());
   robimon::services::serial_console::update(millis());
+  robimon::services::tutorial::update(millis());
 
   // Watch for alarm firing transitions so the face overlay + alarm sound
   // match the alarm_mgr state. Doing this in main keeps alarm_mgr free of

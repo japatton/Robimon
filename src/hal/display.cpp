@@ -120,6 +120,13 @@ void flush() {
   if (s_canvas) s_canvas->flush();
 }
 
+void clear_screen_area(uint16_t color) {
+  if (!s_canvas) return;
+  const int top = OVERLAY_TOP_RESERVED;
+  const int h   = CANVAS_H - OVERLAY_TOP_RESERVED - OVERLAY_BOTTOM_RESERVED;
+  if (h > 0) s_canvas->fillRect(0, top, s_canvas->width(), h, color);
+}
+
 void flush_band(int y, int h) {
   if (!s_canvas || !s_panel || h <= 0) return;
   if (y < 0)              { h += y; y = 0; }

@@ -3,6 +3,7 @@
 #include "wifi_mgr.h"
 #include "../hal/audio.h"
 #include "../face/face.h"
+#include "../ui/screen_mgr.h"
 #include "../app/log.h"
 
 #include <Arduino.h>
@@ -187,6 +188,9 @@ inline void task_exit(State final_state) {
       final_state == State::ERROR_NO_SPEECH ||
       final_state == State::ERROR_OTHER) {
     s_error_started_ms = millis();
+    // Gentle audible failure cue. Friendly, not punishing — pairs with
+    // the CONFUSED face expression set in apply_face_for_state().
+    ::robimon::hal::audio::play_oops();
   }
   esp_task_wdt_delete(NULL);
   s_task = nullptr;
@@ -236,6 +240,18 @@ void voice_task(void*) {
     LOG_I(TAG, "captured %u/%u samples, peak=%ld mean|x|=%ld",
           (unsigned)got, (unsigned)RECORD_SAMPLES,
           (long)peak, (long)mean_abs);
+
+    // Local silence detection — peak can spike from electrical noise
+    // (saw peak~9600 with mean=10 on confirmed-silent recording) so
+    // mean|x| is the real "is there speech" signal. Whisper happily
+    // hallucinates words from pure noise, so gate the POST here.
+    constexpr int32_t MIN_MEAN_FOR_SPEECH = 50;
+    if (mean_abs < MIN_MEAN_FOR_SPEECH) {
+      LOG_I(TAG, "mean below speech threshold — skipping POST");
+      ::robimon::ui::screen_mgr::set_caption("didn't catch that", 2500);
+      task_exit(State::ERROR_NO_SPEECH);
+      return;
+    }
   }
 
   set_state(State::SENDING);
@@ -270,9 +286,9 @@ void voice_task(void*) {
     LOG_I(TAG, "POST -> %d", code);
 
     if (code == 204) {
-      // No-speech reply — surface it on the face so the kid knows
-      // Robimon was listening but didn't catch a word.
-      face::set_caption("didn't catch that", 2500);
+      // No-speech reply — surface it as a top-of-canvas caption so the
+      // kid knows Robimon was listening but didn't catch a word.
+      ::robimon::ui::screen_mgr::set_caption("didn't catch that", 2500);
       http.end(); task_exit(State::ERROR_NO_SPEECH); return;
     }
     if (code != 200) { http.end(); task_exit(State::ERROR_NETWORK);   return; }
@@ -332,14 +348,14 @@ void voice_task(void*) {
 
     // Caption: surface the STT transcript as "you said: ..." above the
     // eyes during playback. Header is server-side ASCII-sanitized so we
-    // can drop it straight into the face render. Missing header (older
-    // companion image) is a graceful no-op.
+    // can drop it straight into the screen-manager overlay. Missing
+    // header (older companion image) is a graceful no-op.
     {
       const String heard = http.header("X-Robimon-Heard");
       if (heard.length() > 0) {
         char buf[80];
         snprintf(buf, sizeof(buf), "you said: %s", heard.c_str());
-        face::set_caption(buf, /*duration_ms=*/4000);
+        ::robimon::ui::screen_mgr::set_caption(buf, /*duration_ms=*/4000);
       }
     }
 

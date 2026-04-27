@@ -62,5 +62,11 @@ void update(uint32_t now_ms);
 // Forward a tap to the current screen (modal top if any, else carousel).
 void on_tap(int panel_x, int panel_y);
 
+// Caption shown at the top of the canvas for `duration_ms`. Rendered as a
+// global overlay (above whatever the current screen drew) so prompts
+// persist across swipes — useful for the voice-flow "you said: ..."
+// callout and the first-boot gesture tutorial.
+void set_caption(const char* text, uint32_t duration_ms = 4000);
+
 }  // namespace screen_mgr
 }  // namespace robimon::ui

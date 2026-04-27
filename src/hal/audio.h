@@ -44,6 +44,14 @@ void play_test_tone();
 // Blocks for ~120 ms total (cue + amp settling).
 void play_listen_cue();
 
+// Short rising "yay" chirp (600→1000 Hz). Used as a success accent on
+// completed voice rounds. Blocks for ~250 ms.
+void play_success();
+
+// Short descending "uh-oh" chirp (700→500 Hz). Used as a gentle failure
+// cue on voice flow errors. Friendly, not punishing. Blocks for ~250 ms.
+void play_oops();
+
 // Alarm sound — repeating two-tone chime that loops on a background task
 // pinned to core 0 so the UI on core 1 stays responsive. start_alarm() is
 // idempotent (no-op if the alarm is already playing); stop_alarm() returns

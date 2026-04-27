@@ -62,6 +62,17 @@ void flush();
 // values are clamped.
 void flush_band(int y, int h);
 
+// Reserved bands at the top + bottom of the canvas for screen-manager
+// overlays (caption + dot indicator). Screens that "clear" the canvas
+// should call clear_screen_area() rather than gfx()->fillScreen() so
+// they don't clobber the overlays between frames.
+constexpr int OVERLAY_TOP_RESERVED    = 46;   // caption band ends at y=42 + safety
+constexpr int OVERLAY_BOTTOM_RESERVED = 22;   // dot band starts at y=304
+
+// Fills the canvas's "screen content" region with the given color, leaving
+// the top + bottom overlay bands alone.
+void clear_screen_area(uint16_t color);
+
 int width();   // canvas width  (panel-equivalent x)
 int height();  // canvas height (NOT panel height — see canvas_panel_y_offset())
 
