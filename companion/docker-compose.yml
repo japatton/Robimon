@@ -1,0 +1,47 @@
+# Robimon companion + Ollama — drop-in for a fresh setup.
+#
+# If you ALREADY have an Ollama container, see docs/VOICE_SETUP.md for the
+# "add companion to existing Ollama" recipe. The short version: build the
+# companion image and run it on the same Docker network as your Ollama
+# container, with OLLAMA_URL=http://<ollama-container-name>:11434.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    # Uncomment for NVIDIA GPU acceleration (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  companion:
+    build: .
+    container_name: robimon-companion
+    ports:
+      - "8765:8765"
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      ROBIMON_MODEL: llama3.1:8b
+      WHISPER_SIZE: base.en
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE: int8
+      PIPER_MODEL: /voices/en_US-amy-medium.onnx
+      # ROBIMON_SYSTEM_PROMPT: "..."   # optional override
+    volumes:
+      # Bind-mount your downloaded Piper voice files here (.onnx + .onnx.json).
+      - ./voices:/voices:ro
+    restart: unless-stopped
+
+volumes:
+  ollama-data:

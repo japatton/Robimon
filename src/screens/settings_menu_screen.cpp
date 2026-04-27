@@ -5,6 +5,7 @@
 #include "about_screen.h"
 #include "alarms_settings_screen.h"
 #include "ha_settings_screen.h"
+#include "voice_settings_screen.h"
 #include "../hal/display.h"
 #include "../app/log.h"
 
@@ -132,7 +133,8 @@ void SettingsMenuScreen::on_tap(int panel_x, int panel_y) {
       else if (strcmp(lbl, "about")   == 0) ::robimon::ui::screen_mgr::push_modal(&about_screen);
       else if (strcmp(lbl, "alarms")  == 0) ::robimon::ui::screen_mgr::push_modal(&alarms_settings_screen);
       else if (strcmp(lbl, "ha")      == 0) ::robimon::ui::screen_mgr::push_modal(&ha_settings_screen);
-      // voice / PIN tiles still stub (F-4 for PIN, I for voice)
+      else if (strcmp(lbl, "voice")   == 0) ::robimon::ui::screen_mgr::push_modal(&voice_settings_screen);
+      // PIN tile still stub (F-4 work)
       return;
     }
   }

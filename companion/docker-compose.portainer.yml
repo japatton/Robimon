@@ -1,0 +1,85 @@
+# Portainer-friendly variant of docker-compose.yml.
+#
+# Use this when you want to paste a stack into Portainer's Web editor and
+# don't have/want a Git repo for the companion source.
+#
+#   - Uses image: <pre-built tag> instead of build: .  (Portainer's Web
+#     editor has no build context)
+#   - Uses named Docker volumes for both Ollama models AND Piper voices
+#     (no host paths to manage; Portainer can manage them via UI)
+#
+# Setup:
+#   1. Build the companion image on any machine with Docker, push it to a
+#      registry your Portainer host can reach. Quickest options:
+#
+#        # Docker Hub (free):
+#        docker build -t YOURUSER/robimon-companion:latest companion/
+#        docker push YOURUSER/robimon-companion:latest
+#
+#        # OR no-registry: build locally, save, scp, load on host:
+#        docker build -t robimon-companion:latest companion/
+#        docker save robimon-companion:latest | gzip > robimon-companion.tar.gz
+#        scp robimon-companion.tar.gz <portainer-host>:/tmp/
+#        ssh <portainer-host> 'gunzip -c /tmp/robimon-companion.tar.gz | docker load'
+#
+#      Then update `image:` below to match what you pushed.
+#
+#   2. In Portainer: Stacks → Add stack → Web editor → paste this YAML.
+#      Deploy.
+#
+#   3. Pull a chat model:
+#        docker exec ollama ollama pull llama3.1:8b
+#
+#   4. Populate the voices volume — one-shot helper container:
+#        docker run --rm -v companion_voices:/voices alpine sh -c "
+#          apk add --no-cache curl ca-certificates &&
+#          cd /voices &&
+#          curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx &&
+#          curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+#        "
+#
+#   5. Verify: curl http://<host>:8765/health
+#
+# To swap voices later: re-run the helper container with a different URL,
+# update PIPER_MODEL env var in the stack, redeploy.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    # Uncomment for NVIDIA GPU acceleration (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  companion:
+    image: robimon-companion:latest      # ← change to YOURUSER/robimon-companion:latest if pushing to Docker Hub
+    container_name: robimon-companion
+    ports:
+      - "8765:8765"
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      ROBIMON_MODEL: llama3.1:8b
+      WHISPER_SIZE: base.en
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE: int8
+      PIPER_MODEL: /voices/en_US-amy-medium.onnx
+      # ROBIMON_SYSTEM_PROMPT: "..."   # optional override
+    volumes:
+      - companion-voices:/voices:ro
+    restart: unless-stopped
+
+volumes:
+  ollama-data:
+  companion-voices:

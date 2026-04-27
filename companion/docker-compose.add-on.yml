@@ -1,0 +1,76 @@
+# Companion-only stack — keeps your existing Ollama stack untouched.
+#
+# Joins your existing Ollama's Docker network as an external network so the
+# companion can reach Ollama by container/service name. Use this when:
+#   - You already have an Ollama Portainer stack you don't want to edit
+#   - You'd rather manage Robimon as a separate stack (separate
+#     update/rollback lifecycle from your Ollama stack)
+#
+# Setup
+# -----
+# 1) Find the network and container name of your existing Ollama:
+#
+#       docker inspect <ollama-container-name> \
+#         --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}'
+#
+#    Portainer also shows the network on the container's detail page.
+#    The network name often looks like "<project>_default" or "<project>_<name>".
+#
+# 2) Edit the env vars below:
+#       OLLAMA_URL → http://<your-ollama-service-name>:11434
+#    And edit the network name below to match your Ollama's network.
+#
+# 3) Get the companion image onto your Portainer host. Easiest options:
+#
+#       # local build + push to Docker Hub:
+#       docker build -t YOURUSER/robimon-companion:latest companion/
+#       docker push YOURUSER/robimon-companion:latest
+#
+#       # OR no-registry build + scp the image:
+#       docker build -t robimon-companion:latest companion/
+#       docker save robimon-companion:latest | gzip > /tmp/rc.tar.gz
+#       scp /tmp/rc.tar.gz <portainer-host>:/tmp/
+#       ssh <portainer-host> 'gunzip -c /tmp/rc.tar.gz | docker load'
+#
+#    Update `image:` below to match.
+#
+# 4) Portainer → Stacks → Add stack → Web editor → paste this YAML → Deploy.
+#
+# 5) Populate the voices volume one-shot:
+#
+#       docker run --rm -v companion_voices:/voices alpine sh -c "
+#         apk add --no-cache curl ca-certificates &&
+#         cd /voices &&
+#         curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx &&
+#         curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+#       "
+#
+# 6) Verify:  curl http://<host>:8765/health
+
+services:
+  companion:
+    image: robimon-companion:latest      # ← change to YOURUSER/robimon-companion:latest if pushing to Hub
+    container_name: robimon-companion
+    ports:
+      - "8765:8765"
+    networks:
+      - ollama-net                       # ← matches network alias below
+    environment:
+      OLLAMA_URL: http://ollama:11434    # ← change "ollama" to your Ollama container/service name
+      ROBIMON_MODEL: llama3.1:8b
+      WHISPER_SIZE: base.en
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE: int8
+      PIPER_MODEL: /voices/en_US-amy-medium.onnx
+      # ROBIMON_SYSTEM_PROMPT: "..."     # optional override
+    volumes:
+      - companion-voices:/voices:ro
+    restart: unless-stopped
+
+networks:
+  ollama-net:
+    external: true
+    name: <YOUR_OLLAMA_NETWORK_NAME>     # ← e.g. "ollama_default"
+
+volumes:
+  companion-voices:
