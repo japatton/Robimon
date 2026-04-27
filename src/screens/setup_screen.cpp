@@ -44,19 +44,22 @@ void SetupScreen::update(uint32_t now_ms) {
   draw_centered_text(g, 50, 2, COLOR_DIM, "first-time configuration");
 
   // Step 1
-  draw_centered_text(g, 90,  2, COLOR_DIM, "1. on your phone, join wifi:");
-  draw_centered_text(g, 116, 3, COLOR_OK,
+  draw_centered_text(g, 84,  2, COLOR_DIM, "1. join wifi:");
+  draw_centered_text(g, 106, 3, COLOR_OK,
                      ::robimon::services::setup_portal::AP_SSID);
+  draw_centered_text(g, 138, 1, COLOR_DIM, "password:");
+  draw_centered_text(g, 152, 2, COLOR_OK,
+                     ::robimon::services::setup_portal::AP_PASSWORD);
 
   // Step 2
-  draw_centered_text(g, 162, 2, COLOR_DIM, "2. open in browser:");
+  draw_centered_text(g, 184, 2, COLOR_DIM, "2. open in browser:");
   char url_buf[40];
   snprintf(url_buf, sizeof(url_buf), "http://%s",
            ::robimon::services::setup_portal::AP_IP);
-  draw_centered_text(g, 188, 2, COLOR_OK, url_buf);
+  draw_centered_text(g, 208, 2, COLOR_OK, url_buf);
 
   // Step 3
-  draw_centered_text(g, 224, 2, COLOR_DIM, "3. fill in the form");
+  draw_centered_text(g, 240, 2, COLOR_DIM, "3. fill in the form");
 
   // Heartbeat at bottom — confirms the device isn't frozen
   const uint32_t s = now_ms / 1000;

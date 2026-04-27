@@ -9,7 +9,9 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <atomic>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <string.h>
@@ -28,13 +30,28 @@ constexpr size_t   RECORD_BYTES     = RECORD_SAMPLES * sizeof(int16_t);
 constexpr size_t   WAV_HDR_BYTES    = 44;
 constexpr size_t   REQUEST_BYTES    = WAV_HDR_BYTES + RECORD_BYTES;
 
-constexpr uint32_t HTTP_TIMEOUT_MS  = 30000;       // STT + LLM + TTS round-trip
-constexpr size_t   MAX_RESPONSE_BYTES = 1024UL * 1024UL;   // 1 MB cap on TTS WAV
+constexpr uint32_t HTTP_TIMEOUT_MS  = 25000;       // shorter than WDT (45 s)
+constexpr size_t   MAX_RESPONSE_BYTES = 512UL * 1024UL;   // 512 KB cap on TTS WAV
 constexpr uint32_t ERROR_HOLD_MS    = 1500;        // confused face dwell
 
-State        s_state             = State::IDLE;
-TaskHandle_t s_task              = nullptr;
-uint32_t     s_error_started_ms  = 0;
+// Output of the resampler (worst case): MAX_RESPONSE_BYTES of source @ 8 kHz
+// upsampled to 16 kHz = 2x the source-PCM length. We size for an 8 kHz mono
+// 16-bit response that fully fills MAX_RESPONSE_BYTES.
+constexpr size_t   MAX_RESAMPLED_BYTES = MAX_RESPONSE_BYTES * 2;
+
+// State as atomic so the main loop can safely poll it without taking a lock.
+// The voice task is the sole writer; the main loop and start() are readers.
+std::atomic<State> s_state{State::IDLE};
+TaskHandle_t       s_task              = nullptr;
+uint32_t           s_error_started_ms  = 0;
+
+// ---- Pooled buffers --------------------------------------------------------
+// Allocated once in begin(); used by voice_task without per-call malloc.
+// Live in PSRAM (~2.1 MB total) since the canvas already lives there and
+// internal RAM is too tight.
+uint8_t* s_request_buf   = nullptr;   // REQUEST_BYTES (~640 KB)
+uint8_t* s_response_buf  = nullptr;   // MAX_RESPONSE_BYTES (~512 KB)
+int16_t* s_resampled_buf = nullptr;   // MAX_RESAMPLED_BYTES (~1 MB)
 
 // -----------------------------------------------------------------------------
 // WAV header helpers
@@ -110,23 +127,20 @@ bool parse_wav(const uint8_t* data, size_t len,
 }
 
 // -----------------------------------------------------------------------------
-// Naive linear resampler from any rate to 16 kHz (mono int16). Returns a
-// freshly-allocated PSRAM buffer; caller must free(). For our use case
-// (Piper output, typically 22.05 kHz) the quality is fine — speech, not
-// music, and the source already band-limits.
+// Naive linear resampler from any rate to 16 kHz (mono int16). Writes into
+// the caller-supplied dst buffer (capacity in samples). Returns the number
+// of samples written, or 0 if dst is too small. Speech-quality only; source
+// is expected to be already band-limited (Piper output).
 // -----------------------------------------------------------------------------
-int16_t* resample_to_16k(const int16_t* src, size_t src_count, uint32_t src_rate,
-                          size_t* out_count) {
+size_t resample_to_16k(const int16_t* src, size_t src_count, uint32_t src_rate,
+                       int16_t* dst, size_t dst_capacity) {
   if (src_rate == 16000) {
-    int16_t* dst = (int16_t*)heap_caps_malloc(src_count * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    if (!dst) return nullptr;
+    if (src_count > dst_capacity) return 0;
     memcpy(dst, src, src_count * sizeof(int16_t));
-    *out_count = src_count;
-    return dst;
+    return src_count;
   }
   const size_t dst_count = (size_t)((uint64_t)src_count * 16000ULL / src_rate);
-  int16_t* dst = (int16_t*)heap_caps_malloc(dst_count * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-  if (!dst) return nullptr;
+  if (dst_count > dst_capacity) return 0;
   for (size_t i = 0; i < dst_count; ++i) {
     const uint64_t src_pos_q16 = (uint64_t)i * src_rate * 65536ULL / 16000ULL;
     const size_t   idx  = (size_t)(src_pos_q16 >> 16);
@@ -139,8 +153,7 @@ int16_t* resample_to_16k(const int16_t* src, size_t src_count, uint32_t src_rate
       dst[i] = (int16_t)(a + ((int32_t)(b - a) * (int32_t)frac >> 16));
     }
   }
-  *out_count = dst_count;
-  return dst;
+  return dst_count;
 }
 
 // -----------------------------------------------------------------------------
@@ -159,24 +172,42 @@ void apply_face_for_state(State s) {
   }
 }
 
+// Set state + apply face. Used so callers don't have to remember to call
+// apply_face_for_state() everywhere.
+inline void set_state(State s) {
+  s_state.store(s, std::memory_order_release);
+  apply_face_for_state(s);
+}
+
+// Common cleanup before the task self-deletes: clear handle, mark IDLE/error,
+// detach from WDT. The handle is cleared BEFORE state changes so any reader
+// that observes IDLE finds a null handle too (avoids the start() race).
+inline void task_exit(State final_state) {
+  if (final_state == State::ERROR_NETWORK ||
+      final_state == State::ERROR_NO_SPEECH ||
+      final_state == State::ERROR_OTHER) {
+    s_error_started_ms = millis();
+  }
+  esp_task_wdt_delete(NULL);
+  s_task = nullptr;
+  set_state(final_state);
+  vTaskDelete(NULL);
+}
+
 // -----------------------------------------------------------------------------
 // Voice task body
 // -----------------------------------------------------------------------------
 void voice_task(void*) {
-  uint8_t*  req       = nullptr;
-  uint8_t*  resp      = nullptr;
-  int16_t*  resampled = nullptr;
+  esp_task_wdt_add(NULL);
 
-  s_state = State::RECORDING;
-  apply_face_for_state(s_state);
-
-  // ---- 1. capture --------------------------------------------------------
-  req = (uint8_t*)heap_caps_malloc(REQUEST_BYTES, MALLOC_CAP_SPIRAM);
-  if (!req) {
-    LOG_E(TAG, "alloc request (%u) failed", (unsigned)REQUEST_BYTES);
-    goto fail_other;
+  if (!s_request_buf || !s_response_buf || !s_resampled_buf) {
+    LOG_E(TAG, "voice buffers not allocated");
+    task_exit(State::ERROR_OTHER);
+    return;
   }
-  build_wav_header(req, CAPTURE_RATE, /*channels=*/1, /*bps=*/16, RECORD_BYTES);
+
+  set_state(State::RECORDING);
+  build_wav_header(s_request_buf, CAPTURE_RATE, /*channels=*/1, /*bps=*/16, RECORD_BYTES);
 
   // Audible "ready" cue. The amp settles and the cue is fully drained before
   // we start capturing so the beep doesn't bleed into the recording.
@@ -184,13 +215,10 @@ void voice_task(void*) {
   delay(60);
 
   {
-    int16_t* pcm = (int16_t*)(req + WAV_HDR_BYTES);
+    int16_t* pcm = (int16_t*)(s_request_buf + WAV_HDR_BYTES);
     const size_t got = ::robimon::hal::audio::capture(pcm, RECORD_SAMPLES);
+    esp_task_wdt_reset();
 
-    // Diagnostic: peak + mean abs across the capture. If peak is near 0
-    // and mean is single-digit, the mic input is silent — points to
-    // an uninitialized ES7210 (the dual digital mic array hangs off
-    // ES7210, not the ES8311 we currently configure).
     int32_t peak = 0;
     int64_t sum_abs = 0;
     for (size_t i = 0; i < got; ++i) {
@@ -205,22 +233,17 @@ void voice_task(void*) {
           (long)peak, (long)mean_abs);
   }
 
-  // ---- 2. POST -----------------------------------------------------------
-  s_state = State::SENDING;
-  apply_face_for_state(s_state);
+  set_state(State::SENDING);
   {
     char url[160] = {0};
     config::get_string("voice_url", url, sizeof(url));
-    if (!url[0]) {
-      LOG_W(TAG, "no voice URL configured");
-      goto fail_other;
-    }
+    if (!url[0]) { LOG_W(TAG, "no voice URL configured"); task_exit(State::ERROR_OTHER); return; }
 
     HTTPClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     if (!http.begin(url)) {
       LOG_W(TAG, "http begin failed: %s", url);
-      goto fail_network;
+      task_exit(State::ERROR_NETWORK); return;
     }
     http.addHeader("Content-Type", "audio/wav");
 
@@ -231,20 +254,19 @@ void voice_task(void*) {
     if (model[0])  http.addHeader("X-Robimon-Model",         model);
     if (prompt[0]) http.addHeader("X-Robimon-System-Prompt", prompt);
 
-    const int code = http.POST(req, REQUEST_BYTES);
-    free(req); req = nullptr;
+    esp_task_wdt_reset();
+    const int code = http.POST(s_request_buf, REQUEST_BYTES);
+    esp_task_wdt_reset();
     LOG_I(TAG, "POST -> %d", code);
 
-    if (code == 204) { http.end(); goto fail_no_speech; }
-    if (code != 200) { http.end(); goto fail_network; }
+    if (code == 204) { http.end(); task_exit(State::ERROR_NO_SPEECH); return; }
+    if (code != 200) { http.end(); task_exit(State::ERROR_NETWORK);   return; }
 
     const int content_len = http.getSize();
     if (content_len <= 0 || (size_t)content_len > MAX_RESPONSE_BYTES) {
-      LOG_W(TAG, "bad content length %d", content_len);
-      http.end(); goto fail_other;
+      LOG_W(TAG, "bad content length %d (cap %u)", content_len, (unsigned)MAX_RESPONSE_BYTES);
+      http.end(); task_exit(State::ERROR_OTHER); return;
     }
-    resp = (uint8_t*)heap_caps_malloc(content_len, MALLOC_CAP_SPIRAM);
-    if (!resp) { http.end(); goto fail_other; }
 
     WiFiClient* stream = http.getStreamPtr();
     size_t total = 0;
@@ -252,111 +274,101 @@ void voice_task(void*) {
     while (total < (size_t)content_len) {
       if (millis() > deadline) {
         LOG_W(TAG, "response read timeout @ %u/%d", (unsigned)total, content_len);
-        http.end(); goto fail_network;
+        http.end(); task_exit(State::ERROR_NETWORK); return;
       }
       const size_t avail = stream->available();
       if (avail == 0) {
         vTaskDelay(pdMS_TO_TICKS(10));
+        esp_task_wdt_reset();
         continue;
       }
       const size_t want = avail < (size_t)content_len - total ? avail : (size_t)content_len - total;
-      total += stream->readBytes(resp + total, want);
+      total += stream->readBytes(s_response_buf + total, want);
     }
     http.end();
+    esp_task_wdt_reset();
     LOG_I(TAG, "received %u bytes", (unsigned)total);
 
-    // ---- 3. parse + resample + play -----------------------------------
     uint32_t resp_rate = 0;
     uint16_t resp_ch   = 0, resp_bps = 0;
     size_t   pcm_off = 0, pcm_len = 0;
-    if (!parse_wav(resp, content_len, &resp_rate, &resp_ch, &resp_bps, &pcm_off, &pcm_len)) {
+    if (!parse_wav(s_response_buf, content_len, &resp_rate, &resp_ch, &resp_bps, &pcm_off, &pcm_len)) {
       LOG_W(TAG, "bad WAV in response");
-      goto fail_other;
+      task_exit(State::ERROR_OTHER); return;
     }
     LOG_I(TAG, "WAV: %u Hz, %u ch, %u-bit, %u PCM bytes",
           (unsigned)resp_rate, (unsigned)resp_ch, (unsigned)resp_bps, (unsigned)pcm_len);
 
     if (resp_bps != 16 || resp_ch != 1) {
       LOG_W(TAG, "unsupported WAV format (need mono 16-bit)");
-      goto fail_other;
+      task_exit(State::ERROR_OTHER); return;
     }
 
-    const int16_t* src = (const int16_t*)(resp + pcm_off);
+    const int16_t* src = (const int16_t*)(s_response_buf + pcm_off);
     const size_t   src_count = pcm_len / sizeof(int16_t);
-    size_t         dst_count = 0;
-    resampled = resample_to_16k(src, src_count, resp_rate, &dst_count);
-    free(resp); resp = nullptr;
-    if (!resampled) goto fail_other;
+    const size_t   resampled_count = resample_to_16k(
+        src, src_count, resp_rate,
+        s_resampled_buf, MAX_RESAMPLED_BYTES / sizeof(int16_t));
+    if (resampled_count == 0) {
+      LOG_W(TAG, "resampler overflow (src %u @ %u Hz)",
+            (unsigned)src_count, (unsigned)resp_rate);
+      task_exit(State::ERROR_OTHER); return;
+    }
 
-    s_state = State::PLAYING;
-    apply_face_for_state(s_state);
+    set_state(State::PLAYING);
     ::robimon::hal::audio::enable_amp(true);
     delay(10);
-    ::robimon::hal::audio::play(resampled, dst_count);
+    ::robimon::hal::audio::play(s_resampled_buf, resampled_count);
     delay(40);
     ::robimon::hal::audio::enable_amp(false);
-    free(resampled); resampled = nullptr;
+    esp_task_wdt_reset();
   }
 
-  s_state = State::IDLE;
-  apply_face_for_state(s_state);
-  s_task = nullptr;
-  vTaskDelete(NULL);
-  return;
-
-fail_other:
-  if (req)       { free(req);       req = nullptr; }
-  if (resp)      { free(resp);      resp = nullptr; }
-  if (resampled) { free(resampled); resampled = nullptr; }
-  s_state = State::ERROR_OTHER;
-  s_error_started_ms = millis();
-  apply_face_for_state(s_state);
-  s_task = nullptr;
-  vTaskDelete(NULL);
-  return;
-
-fail_network:
-  if (req)  { free(req);  req = nullptr; }
-  if (resp) { free(resp); resp = nullptr; }
-  s_state = State::ERROR_NETWORK;
-  s_error_started_ms = millis();
-  apply_face_for_state(s_state);
-  s_task = nullptr;
-  vTaskDelete(NULL);
-  return;
-
-fail_no_speech:
-  if (req) { free(req); req = nullptr; }
-  s_state = State::ERROR_NO_SPEECH;
-  s_error_started_ms = millis();
-  apply_face_for_state(s_state);
-  s_task = nullptr;
-  vTaskDelete(NULL);
-  return;
+  task_exit(State::IDLE);
 }
 
 }  // namespace
 
 void begin() {
-  s_state = State::IDLE;
-  s_task  = nullptr;
+  s_state.store(State::IDLE);
+  s_task = nullptr;
+
+  // Allocate the buffer pool once. Total ~2.1 MB PSRAM, sized so a worst-case
+  // voice round-trip never touches malloc on the hot path.
+  if (!s_request_buf) {
+    s_request_buf = (uint8_t*)heap_caps_malloc(REQUEST_BYTES, MALLOC_CAP_SPIRAM);
+  }
+  if (!s_response_buf) {
+    s_response_buf = (uint8_t*)heap_caps_malloc(MAX_RESPONSE_BYTES, MALLOC_CAP_SPIRAM);
+  }
+  if (!s_resampled_buf) {
+    s_resampled_buf = (int16_t*)heap_caps_malloc(MAX_RESAMPLED_BYTES, MALLOC_CAP_SPIRAM);
+  }
+  if (!s_request_buf || !s_response_buf || !s_resampled_buf) {
+    LOG_E(TAG, "voice buffer pool alloc failed");
+  } else {
+    LOG_I(TAG, "voice buffers ready (req=%u resp=%u rs=%u)",
+          (unsigned)REQUEST_BYTES,
+          (unsigned)MAX_RESPONSE_BYTES,
+          (unsigned)MAX_RESAMPLED_BYTES);
+  }
 }
 
 void update(uint32_t now_ms) {
   // Auto-clear the error state after a brief dwell so the user gets visual
   // feedback ("confused face") then returns to normal.
-  if ((s_state == State::ERROR_NETWORK ||
-       s_state == State::ERROR_NO_SPEECH ||
-       s_state == State::ERROR_OTHER) &&
+  const State cur = s_state.load(std::memory_order_acquire);
+  if ((cur == State::ERROR_NETWORK ||
+       cur == State::ERROR_NO_SPEECH ||
+       cur == State::ERROR_OTHER) &&
       (now_ms - s_error_started_ms) > ERROR_HOLD_MS) {
-    s_state = State::IDLE;
-    apply_face_for_state(s_state);
+    set_state(State::IDLE);
   }
 }
 
-State        state()     { return s_state; }
+State        state()     { return s_state.load(std::memory_order_acquire); }
 const char*  state_str() {
-  switch (s_state) {
+  switch (state()) {
     case State::IDLE:            return "idle";
     case State::RECORDING:       return "recording";
     case State::SENDING:         return "sending";
@@ -369,13 +381,14 @@ const char*  state_str() {
 }
 
 bool start() {
-  if (s_state != State::IDLE)         return false;
-  if (s_task != nullptr)              return false;
+  // s_state is the single source of truth: IDLE means "no task running".
+  // s_task is cleared BEFORE state moves to IDLE in task_exit() so this
+  // ordering can't see a stale handle.
+  if (s_state.load(std::memory_order_acquire) != State::IDLE) return false;
   if (wifi_mgr::state() != wifi_mgr::State::CONNECTED) {
     LOG_W(TAG, "not connected to wifi");
-    s_state = State::ERROR_NETWORK;
     s_error_started_ms = millis();
-    apply_face_for_state(s_state);
+    set_state(State::ERROR_NETWORK);
     return false;
   }
   // 16 KB stack covers HTTPClient + ArduinoString + our locals.

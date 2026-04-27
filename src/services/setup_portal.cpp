@@ -117,6 +117,32 @@ scan();
 
 const char* const SAVED_PAGE = R"HTML(<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Saved</title><style>body{background:#0a0a0e;color:#eee;font-family:system-ui,sans-serif;text-align:center;padding:3em 1em}h1{color:#38c8ff}</style></head><body><h1>Saved!</h1><p>Robimon will reboot now.</p><p>Re-connect to your WiFi and the device will come back online.</p></body></html>)HTML";
 
+// Renders a friendly error page with a back link. Used when form input
+// fails validation — we don't want to silently truncate.
+void send_error_page(const char* msg) {
+  char buf[640];
+  snprintf(buf, sizeof(buf),
+    "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    "<title>Setup error</title>"
+    "<style>body{background:#0a0a0e;color:#eee;font-family:system-ui,sans-serif;text-align:center;padding:3em 1em}"
+    "h1{color:#ff5577}p{color:#ccc}a{color:#38c8ff;display:inline-block;margin-top:1em;text-decoration:none;"
+    "padding:0.6em 1.2em;background:#1a1a2e;border-radius:4px}</style></head>"
+    "<body><h1>Hold on…</h1><p>%s</p><a href=\"/\">Back to form</a></body></html>",
+    msg);
+  s_web.send(400, "text/html", buf);
+}
+
+// Bounds: WiFi spec is SSID 1-32 octets; WPA2 passphrase 8-63 ASCII (or
+// empty for an open AP). HA URL/token are stored in fixed NVS slots so we
+// reject anything that would otherwise be silently truncated. Names use
+// a CFG_ prefix to dodge ESP-IDF's WiFi macros (MAX_SSID_LEN, etc.).
+constexpr size_t CFG_MAX_SSID    = 32;
+constexpr size_t CFG_MAX_PASS    = 63;
+constexpr size_t CFG_MIN_PASS    = 8;       // WPA2 minimum
+constexpr size_t CFG_MAX_URL     = 159;
+constexpr size_t CFG_MAX_TOKEN   = 255;
+constexpr size_t CFG_MAX_ENTITY  = 79;
+
 // ---- HTTP handlers --------------------------------------------------------
 void handle_root() {
   s_web.send(200, "text/html", SETUP_PAGE);
@@ -155,14 +181,49 @@ void handle_scan() {
 
 void handle_save() {
   using namespace ::robimon::services;
-  // All fields are optional except wifi_ssid; we still accept and persist
-  // whatever's there so a re-run can incrementally set just one section.
-  if (s_web.hasArg("wifi_ssid")) config::set_string("wifi_ssid", s_web.arg("wifi_ssid").c_str());
-  if (s_web.hasArg("wifi_pass")) config::set_string("wifi_pass", s_web.arg("wifi_pass").c_str());
-  if (s_web.hasArg("tz"))        config::set_string("tz_posix",  s_web.arg("tz").c_str());
-  if (s_web.hasArg("ha_url"))    config::set_string("ha_url",    s_web.arg("ha_url").c_str());
-  if (s_web.hasArg("ha_token"))  config::set_string("ha_token",  s_web.arg("ha_token").c_str());
-  if (s_web.hasArg("ha_entity")) config::set_string("ha_entity", s_web.arg("ha_entity").c_str());
+
+  const String ssid    = s_web.hasArg("wifi_ssid") ? s_web.arg("wifi_ssid") : String();
+  const String pass    = s_web.hasArg("wifi_pass") ? s_web.arg("wifi_pass") : String();
+  const String tz      = s_web.hasArg("tz")        ? s_web.arg("tz")        : String();
+  const String url     = s_web.hasArg("ha_url")    ? s_web.arg("ha_url")    : String();
+  const String token   = s_web.hasArg("ha_token")  ? s_web.arg("ha_token")  : String();
+  const String entity  = s_web.hasArg("ha_entity") ? s_web.arg("ha_entity") : String();
+
+  // ---- validate ----------------------------------------------------------
+  if (ssid.length() == 0 || ssid.length() > CFG_MAX_SSID) {
+    send_error_page("Pick a WiFi network from the list (or rescan).");
+    return;
+  }
+  if (pass.length() != 0 && (pass.length() < CFG_MIN_PASS || pass.length() > CFG_MAX_PASS)) {
+    send_error_page("WiFi password must be 8-63 characters (or blank for an open network).");
+    return;
+  }
+  if (url.length() > CFG_MAX_URL) {
+    send_error_page("Home Assistant URL is too long.");
+    return;
+  }
+  if (url.length() != 0
+      && !url.startsWith("ws://") && !url.startsWith("http://")
+      && url.indexOf('.') == -1   /* allow bare hostnames */) {
+    send_error_page("Home Assistant URL should look like ws://homeassistant.local:8123 or be a hostname.");
+    return;
+  }
+  if (token.length() > CFG_MAX_TOKEN) {
+    send_error_page("HA access token is too long (max 255 chars).");
+    return;
+  }
+  if (entity.length() > CFG_MAX_ENTITY) {
+    send_error_page("HA default entity name is too long.");
+    return;
+  }
+
+  // ---- persist -----------------------------------------------------------
+  config::set_string("wifi_ssid", ssid.c_str());
+  config::set_string("wifi_pass", pass.c_str());
+  if (tz.length())     config::set_string("tz_posix",  tz.c_str());
+  config::set_string("ha_url",    url.c_str());
+  config::set_string("ha_token",  token.c_str());
+  config::set_string("ha_entity", entity.c_str());
   config::set_uint("configured", 1);
 
   s_web.send(200, "text/html", SAVED_PAGE);
@@ -185,7 +246,10 @@ void handle_captive() {
 void begin() {
   WiFi.disconnect(true, true);
   WiFi.mode(WIFI_AP);              // AP only — STA gets enabled if scan needs it
-  WiFi.softAP(AP_SSID);            // open network for easy phone connect
+  // WPA2-protected so a passive attacker can't sniff the wifi password and
+  // HA token the parent types into the form. Password is printed on the
+  // setup screen along with the SSID.
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
   // Default AP IP is 192.168.4.1; that's what we hand out via DNS too.
 
   // Captive-portal DNS: every query → AP IP. iOS/Android then trigger their

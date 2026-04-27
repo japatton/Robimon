@@ -16,6 +16,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <esp_task_wdt.h>
 
 #include "hal/board.h"
 #include "hal/io_expander.h"
@@ -64,6 +65,21 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   LOG_I(TAG, "Robimon %s booting", ROBIMON_VERSION);
+
+  // Bump task watchdog timeout to 45 s. The default (5 s on Arduino-ESP32 3.x)
+  // panics during a slow voice round-trip (Whisper + LLM + Piper can take
+  // 10-20 s). Subscribed tasks must call esp_task_wdt_reset() before the
+  // timeout; the main loop's per-iteration reset below covers itself, and
+  // voice_task / alarm_task subscribe themselves and reset internally.
+  const esp_task_wdt_config_t wdt_cfg = {
+      .timeout_ms     = 45000,
+      .idle_core_mask = 0,
+      .trigger_panic  = true,
+  };
+  esp_task_wdt_reconfigure(&wdt_cfg);
+  // Subscribe the loop task. ESP_ERR_INVALID_ARG = already subscribed (depends
+  // on Arduino-ESP32 build options); harmless either way.
+  esp_task_wdt_add(NULL);
 
   Wire.begin(robimon::board::I2C_SDA, robimon::board::I2C_SCL, robimon::board::I2C_FREQ_HZ);
   LOG_I(TAG, "I2C up: SDA=%d SCL=%d @ %lu Hz",
@@ -187,6 +203,7 @@ void loop() {
     robimon::ui::screen_mgr::update(millis());
     robimon::stats::note_frame();
     robimon::stats::tick();
+    esp_task_wdt_reset();
     delay(5);
     return;
   }
@@ -287,5 +304,6 @@ void loop() {
   robimon::ui::screen_mgr::update(millis());
   robimon::stats::note_frame();
   robimon::stats::tick();
+  esp_task_wdt_reset();   // kick the dog every iteration
   delay(2);
 }

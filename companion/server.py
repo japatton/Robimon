@@ -84,13 +84,25 @@ WHISPER_COMPUTE  = os.environ.get("WHISPER_COMPUTE", "int8")
 PIPER_MODEL      = os.environ.get("PIPER_MODEL", "en_US-amy-medium.onnx")
 OLLAMA_TIMEOUT_S = float(os.environ.get("OLLAMA_TIMEOUT_S", 60))
 
-DEFAULT_SYSTEM_PROMPT = os.environ.get(
-    "ROBIMON_SYSTEM_PROMPT",
-    "You are a friendly, kid-appropriate companion robot named Robimon. "
-    "Keep responses short, warm, and age-appropriate (5-10 year old audience). "
-    "Avoid scary, violent, or adult topics. If asked something inappropriate, "
-    "gently redirect to a fun topic. Speak in 1-3 sentences when possible.",
+# BASELINE_SYSTEM_PROMPT is the always-on kid-safety guardrail. It is
+# prepended to every chat request. The device may supply an
+# X-Robimon-System-Prompt header, which is APPENDED — it cannot override
+# or remove the baseline. This keeps the safety guarantee even if the
+# parent (or anyone with access to the voice settings screen) sets a
+# silly or empty custom prompt.
+BASELINE_SYSTEM_PROMPT = os.environ.get(
+    "ROBIMON_BASELINE_PROMPT",
+    "You are Robimon, a friendly desk companion for a 6-10 year old child. "
+    "Keep responses to 1-3 short sentences using simple words. "
+    "Never discuss violence, weapons, adult topics, dating, drugs, alcohol, "
+    "self-harm, or anything frightening. If asked about scary or adult "
+    "topics, gently redirect to something fun like animals, space, or "
+    "what the child is doing today. End with a small friendly question "
+    "to keep the conversation going.",
 )
+# Optional extra prompt appended to the baseline. Used as the default when
+# the device does not send X-Robimon-System-Prompt.
+DEFAULT_EXTRA_PROMPT = os.environ.get("ROBIMON_SYSTEM_PROMPT", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("robimon")
@@ -171,8 +183,13 @@ def chat():
     audio = request.get_data()
     if not audio:
         return "empty body", 400
-    model       = request.headers.get("X-Robimon-Model",         DEFAULT_MODEL)
-    sys_prompt  = request.headers.get("X-Robimon-System-Prompt", DEFAULT_SYSTEM_PROMPT)
+    model      = request.headers.get("X-Robimon-Model", DEFAULT_MODEL)
+    extra      = request.headers.get("X-Robimon-System-Prompt", DEFAULT_EXTRA_PROMPT)
+    # Baseline always wins. Extra (parent-supplied) appends and cannot
+    # remove or override the safety guardrail.
+    sys_prompt = BASELINE_SYSTEM_PROMPT
+    if extra:
+        sys_prompt = sys_prompt + "\n\nAdditional instructions: " + extra
 
     text = transcribe(audio)
     if not text:

@@ -14,8 +14,9 @@
 
 namespace robimon::services::setup_portal {
 
-constexpr const char* AP_SSID = "Robimon-Setup";
-constexpr const char* AP_IP   = "192.168.4.1";
+constexpr const char* AP_SSID     = "Robimon-Setup";
+constexpr const char* AP_PASSWORD = "robimon-setup";   // 13 chars, WPA2 minimum is 8
+constexpr const char* AP_IP       = "192.168.4.1";
 
 void begin();
 void update(uint32_t now_ms);

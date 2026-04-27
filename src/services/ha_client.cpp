@@ -77,13 +77,26 @@ EntityState* find_entity(const char* entity_id) {
 }
 
 // ---- WS handlers ---------------------------------------------------------
+// Helper: serialize doc into a stack buffer and send. Avoids the per-call
+// String allocation (Arduino's String concatenates via realloc and fragments
+// the heap on long-running services like this).
+template <size_t N>
+bool send_doc(const JsonDocument& doc, char (&buf)[N]) {
+  const size_t len = serializeJson(doc, buf, N);
+  if (len == 0 || len >= N) {
+    LOG_W(TAG, "serialize overflow");
+    return false;
+  }
+  s_ws.sendTXT((uint8_t*)buf, len);
+  return true;
+}
+
 void send_auth() {
   JsonDocument doc;
   doc["type"]         = "auth";
   doc["access_token"] = s_token;
-  String out;
-  serializeJson(doc, out);
-  s_ws.sendTXT(out);
+  char buf[384];
+  send_doc(doc, buf);
   s_state = State::AUTHENTICATING;
 }
 
@@ -92,18 +105,16 @@ void subscribe_state_changes() {
   doc["id"]         = s_next_msg_id++;
   doc["type"]       = "subscribe_events";
   doc["event_type"] = "state_changed";
-  String out;
-  serializeJson(doc, out);
-  s_ws.sendTXT(out);
+  char buf[128];
+  send_doc(doc, buf);
 }
 
 void request_initial_states() {
   JsonDocument doc;
   doc["id"]   = s_next_msg_id++;
   doc["type"] = "get_states";
-  String out;
-  serializeJson(doc, out);
-  s_ws.sendTXT(out);
+  char buf[64];
+  send_doc(doc, buf);
 }
 
 void apply_state_object(JsonObjectConst obj) {
@@ -128,6 +139,15 @@ void apply_state_object(JsonObjectConst obj) {
 }
 
 void on_text(const char* payload, size_t len) {
+  // Hard cap on payload size. Real HA state_changed events are <8 KB; an
+  // entity with a multi-MB attribute (or a malformed/malicious frame) would
+  // otherwise force ArduinoJson to allocate up to that size.
+  constexpr size_t MAX_FRAME_BYTES = 32 * 1024;
+  if (len > MAX_FRAME_BYTES) {
+    LOG_W(TAG, "frame too large: %u bytes", (unsigned)len);
+    return;
+  }
+
   JsonDocument doc;
   // HA state_changed events can nest fairly deep when entities have rich
   // attributes (e.g., nested device_info / connections arrays). The
@@ -302,9 +322,8 @@ bool call_service(const char* domain, const char* service, const char* entity_id
   doc["service"]              = service;
   doc["target"]["entity_id"]  = entity_id;
 
-  String out;
-  serializeJson(doc, out);
-  s_ws.sendTXT(out);
+  char buf[256];
+  if (!send_doc(doc, buf)) return false;
   LOG_I(TAG, "call_service %s.%s -> %s", domain, service, entity_id);
   return true;
 }
@@ -319,9 +338,8 @@ bool light_turn_on(const char* entity_id, int brightness, int color_temp_kelvin)
   doc["target"]["entity_id"]  = entity_id;
   if (brightness        >= 0) doc["service_data"]["brightness"]        = brightness;
   if (color_temp_kelvin >= 0) doc["service_data"]["color_temp_kelvin"] = color_temp_kelvin;
-  String out;
-  serializeJson(doc, out);
-  s_ws.sendTXT(out);
+  char buf[320];
+  if (!send_doc(doc, buf)) return false;
   LOG_I(TAG, "light.turn_on %s b=%d k=%d", entity_id, brightness, color_temp_kelvin);
   return true;
 }

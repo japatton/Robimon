@@ -13,6 +13,7 @@ extern "C" {
 #include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_task_wdt.h>
 
 namespace robimon::hal::audio {
 
@@ -233,41 +234,42 @@ size_t generate_tone(int16_t* buf, uint32_t freq_hz, uint32_t ms, float amplitud
   return samples;
 }
 
-// Background task: pre-computes a low+high two-tone chime and loops it
-// until s_alarm_stop is set. Pinned to core 0 so it doesn't compete with
-// the UI/render loop on core 1.
-void alarm_task(void*) {
-  constexpr uint32_t LO_HZ   = 600;
-  constexpr uint32_t HI_HZ   = 880;
-  constexpr uint32_t TONE_MS = 180;
-  constexpr uint32_t MID_GAP_MS  = 40;     // silence between the two tones
-  constexpr uint32_t REST_MS     = 380;    // silence between repetitions
-  constexpr float    AMPLITUDE   = 0.55f;
+// Static tone buffers — sized at compile time for 16 kHz × 180 ms.
+// Saves a per-task malloc and dodges PSRAM-fragmentation-flavored failures.
+constexpr uint32_t ALARM_TONE_MS    = 180;
+constexpr size_t   ALARM_TONE_SAMPS = (size_t)(16000 * ALARM_TONE_MS / 1000);
+static int16_t s_alarm_lo[ALARM_TONE_SAMPS];
+static int16_t s_alarm_hi[ALARM_TONE_SAMPS];
 
-  const size_t lo_samples = (size_t)((uint64_t)s_sample_rate * TONE_MS / 1000UL);
-  const size_t hi_samples = lo_samples;
-  int16_t* lo_buf = (int16_t*)malloc(lo_samples * sizeof(int16_t));
-  int16_t* hi_buf = (int16_t*)malloc(hi_samples * sizeof(int16_t));
-  if (!lo_buf || !hi_buf) {
-    if (lo_buf) free(lo_buf);
-    if (hi_buf) free(hi_buf);
-    s_alarm_running = false;
-    s_alarm_task = nullptr;
-    vTaskDelete(NULL);
-    return;
-  }
-  generate_tone(lo_buf, LO_HZ, TONE_MS, AMPLITUDE);
-  generate_tone(hi_buf, HI_HZ, TONE_MS, AMPLITUDE);
+// Background task: plays a pre-computed two-tone chime in a loop until
+// s_alarm_stop is set. Pinned to core 0 so it doesn't compete with the
+// UI/render loop on core 1.
+void alarm_task(void*) {
+  constexpr uint32_t LO_HZ      = 600;
+  constexpr uint32_t HI_HZ      = 880;
+  constexpr uint32_t MID_GAP_MS = 40;       // silence between the two tones
+  constexpr uint32_t REST_MS    = 380;      // silence between repetitions
+  constexpr float    AMPLITUDE  = 0.55f;
+
+  // Sample rate may differ from compile-time assumption; if so, recompute
+  // a usable subset rather than reallocating.
+  const size_t samples = (size_t)((uint64_t)s_sample_rate * ALARM_TONE_MS / 1000UL);
+  const size_t use_samples = samples > ALARM_TONE_SAMPS ? ALARM_TONE_SAMPS : samples;
+  generate_tone(s_alarm_lo, LO_HZ, ALARM_TONE_MS, AMPLITUDE);
+  generate_tone(s_alarm_hi, HI_HZ, ALARM_TONE_MS, AMPLITUDE);
+
+  esp_task_wdt_add(NULL);
 
   enable_amp(true);
   vTaskDelay(pdMS_TO_TICKS(8));   // let the amp settle so the first sample doesn't pop
 
   while (!s_alarm_stop.load()) {
-    play(lo_buf, lo_samples);
+    esp_task_wdt_reset();
+    play(s_alarm_lo, use_samples);
     if (s_alarm_stop.load()) break;
     vTaskDelay(pdMS_TO_TICKS(MID_GAP_MS));
     if (s_alarm_stop.load()) break;
-    play(hi_buf, hi_samples);
+    play(s_alarm_hi, use_samples);
     if (s_alarm_stop.load()) break;
     // Rest period — broken into small slices so we can react to stop quickly.
     for (uint32_t waited = 0; waited < REST_MS && !s_alarm_stop.load(); waited += 30) {
@@ -276,8 +278,7 @@ void alarm_task(void*) {
   }
 
   enable_amp(false);
-  free(lo_buf);
-  free(hi_buf);
+  esp_task_wdt_delete(NULL);
   s_alarm_running = false;
   s_alarm_task = nullptr;
   vTaskDelete(NULL);
@@ -306,6 +307,13 @@ void stop_alarm() {
 
 bool alarm_is_playing() { return s_alarm_running.load(); }
 
+// Static buffers — listen cue is invoked from voice_task; avoids
+// per-call mallocs on a path that runs every voice interaction.
+constexpr uint32_t CUE_TONE_MS    = 90;
+constexpr size_t   CUE_TONE_SAMPS = (size_t)(16000 * CUE_TONE_MS / 1000);
+static int16_t s_cue_lo[CUE_TONE_SAMPS];
+static int16_t s_cue_hi[CUE_TONE_SAMPS];
+
 void play_listen_cue() {
   if (!s_ok) return;
 
@@ -316,19 +324,12 @@ void play_listen_cue() {
   // generously after the last tone.
   constexpr uint32_t lo_hz     = 800;
   constexpr uint32_t hi_hz     = 1200;
-  constexpr uint32_t tone_ms   = 90;
   constexpr float    amplitude = 0.85f;
 
-  const size_t samples = (size_t)((uint64_t)s_sample_rate * tone_ms / 1000UL);
-  int16_t* lo_buf = (int16_t*)malloc(samples * sizeof(int16_t));
-  int16_t* hi_buf = (int16_t*)malloc(samples * sizeof(int16_t));
-  if (!lo_buf || !hi_buf) {
-    if (lo_buf) free(lo_buf);
-    if (hi_buf) free(hi_buf);
-    return;
-  }
-  generate_tone(lo_buf, lo_hz, tone_ms, amplitude);
-  generate_tone(hi_buf, hi_hz, tone_ms, amplitude);
+  const size_t samples = (size_t)((uint64_t)s_sample_rate * CUE_TONE_MS / 1000UL);
+  const size_t use_samples = samples > CUE_TONE_SAMPS ? CUE_TONE_SAMPS : samples;
+  generate_tone(s_cue_lo, lo_hz, CUE_TONE_MS, amplitude);
+  generate_tone(s_cue_hi, hi_hz, CUE_TONE_MS, amplitude);
 
   int saved_vol = 0;
   es8311_voice_volume_get(s_codec, &saved_vol);
@@ -336,16 +337,19 @@ void play_listen_cue() {
   es8311_voice_volume_set(s_codec, MAX_VOLUME_PERCENT, &set_to);
 
   enable_amp(true);
-  delay(25);                 // amp soft-start
-  play(lo_buf, samples);
-  play(hi_buf, samples);
-  delay(tone_ms + 60);       // drain DMA before muting amp
+  delay(25);                       // amp soft-start
+  play(s_cue_lo, use_samples);
+  play(s_cue_hi, use_samples);
+  delay(CUE_TONE_MS + 60);         // drain DMA before muting amp
   enable_amp(false);
 
   es8311_voice_volume_set(s_codec, saved_vol, &set_to);
-  free(lo_buf);
-  free(hi_buf);
 }
+
+// Static buffer for the boot test tone — 16 kHz × 500 ms = 16 KB.
+constexpr uint32_t TEST_TONE_MS    = 500;
+constexpr size_t   TEST_TONE_SAMPS = (size_t)(16000 * TEST_TONE_MS / 1000);
+static int16_t s_test_buf[TEST_TONE_SAMPS];
 
 void play_test_tone() {
   if (!s_ok) return;
@@ -354,25 +358,11 @@ void play_test_tone() {
   // the room; well below "startle a kid" loud. The codec volume is also
   // pushed to the project max (70 %) for the duration, then restored.
   constexpr uint32_t freq_hz = 600;
-  constexpr uint32_t ms = 500;
   constexpr float    amplitude = 0.70f;
 
-  const size_t samples = (size_t)((uint64_t)s_sample_rate * ms / 1000UL);
-  int16_t* buf = (int16_t*)malloc(samples * sizeof(int16_t));
-  if (!buf) return;
-
-  const float dt = 1.0f / (float)s_sample_rate;
-  // Linear ramp in/out over the first/last 8 ms suppresses the click at
-  // the edges (the "step" from 0 to full amplitude pops the speaker).
-  const size_t fade = (size_t)((uint64_t)s_sample_rate * 8 / 1000UL);
-  for (size_t i = 0; i < samples; ++i) {
-    const float t = (float)i * dt;
-    float env = 1.0f;
-    if (i < fade)               env = (float)i / (float)fade;
-    if (i >= samples - fade)    env = (float)(samples - i) / (float)fade;
-    buf[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freq_hz * t)
-                       * 32767.0f * amplitude * env);
-  }
+  const size_t samples = (size_t)((uint64_t)s_sample_rate * TEST_TONE_MS / 1000UL);
+  const size_t use_samples = samples > TEST_TONE_SAMPS ? TEST_TONE_SAMPS : samples;
+  generate_tone(s_test_buf, freq_hz, TEST_TONE_MS, amplitude);
 
   // Save and bump codec volume for the test, then restore.
   int saved_vol = 0;
@@ -382,12 +372,11 @@ void play_test_tone() {
 
   enable_amp(true);
   delay(10);            // let the amp settle before pushing samples → less popping
-  play(buf, samples);
+  play(s_test_buf, use_samples);
   delay(40);            // drain the I2S DMA before muting the amp
   enable_amp(false);
 
   es8311_voice_volume_set(s_codec, saved_vol, &set_to);
-  free(buf);
 }
 
 bool ok() { return s_ok; }
