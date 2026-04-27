@@ -21,6 +21,13 @@ constexpr int CANVAS_OUTPUT_Y = (466 - CANVAS_H) / 2;   // 73
 Arduino_DataBus* s_bus      = nullptr;
 Arduino_CO5300*  s_panel    = nullptr;
 Arduino_Canvas*  s_canvas   = nullptr;
+
+// Idle-aware brightness state. user_b is the most-recent user-set level
+// (the ceiling); current_b is what the panel is actually rendering at.
+// We only push to the panel when current_b changes — keeps apply_idle_*
+// cheap to call every loop iteration.
+uint8_t s_user_b    = 180;
+uint8_t s_current_b = 180;
 }  // namespace
 
 bool begin() {
@@ -61,7 +68,9 @@ bool begin() {
 
   s_canvas->fillScreen(0x0000);
   s_canvas->flush();
-  s_panel->setBrightness(180);
+  s_user_b    = 180;
+  s_current_b = 180;
+  s_panel->setBrightness(s_user_b);
 
   // TE pin as plain input; flush() polls it before pushing.
   pinMode(LCD_TE, INPUT);
@@ -73,7 +82,25 @@ bool begin() {
 }
 
 void set_brightness(uint8_t b) {
+  s_user_b = b;
+  s_current_b = b;
   if (s_panel) s_panel->setBrightness(b);
+}
+
+uint8_t user_brightness() { return s_user_b; }
+
+void apply_idle_brightness(uint32_t idle_ms) {
+  // Compute the desired level. Dim is 10 % of user (rounded up so a
+  // user_b=16 doesn't go fully black on dim).
+  uint8_t want;
+  if      (idle_ms >= AUTO_BLANK_MS) want = 0;
+  else if (idle_ms >= AUTO_DIM_MS)   want = (uint8_t)((s_user_b + 9) / 10);
+  else                                want = s_user_b;
+
+  if (want != s_current_b) {
+    s_current_b = want;
+    if (s_panel) s_panel->setBrightness(want);
+  }
 }
 
 Arduino_GFX* gfx() { return s_canvas; }
@@ -91,6 +118,21 @@ void wait_for_te() {
 
 void flush() {
   if (s_canvas) s_canvas->flush();
+}
+
+void flush_band(int y, int h) {
+  if (!s_canvas || !s_panel || h <= 0) return;
+  if (y < 0)              { h += y; y = 0; }
+  if (y >= CANVAS_H)      return;
+  if (y + h > CANVAS_H)   h = CANVAS_H - y;
+  if (h <= 0)             return;
+  // Full-width slice of the framebuffer — contiguous in memory, so we can
+  // hand it to the panel as a single bitmap write.
+  uint16_t* fb = (uint16_t*)s_canvas->getFramebuffer();
+  if (!fb) return;
+  s_panel->draw16bitRGBBitmap(0, CANVAS_OUTPUT_Y + y,
+                               fb + (size_t)y * (size_t)s_canvas->width(),
+                               s_canvas->width(), h);
 }
 
 }  // namespace robimon::hal::display

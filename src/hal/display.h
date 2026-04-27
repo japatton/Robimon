@@ -24,7 +24,23 @@ namespace robimon::hal::display {
 bool begin();
 
 // Set panel brightness (0..255). Implemented via CO5300 register write.
+// This is the user-set ceiling — apply_idle_brightness() may render at a
+// fraction of this (dim) or skip drawing (blank) without overwriting it.
 void set_brightness(uint8_t brightness_0_255);
+
+// Returns the user-set brightness (most recent value passed to set_brightness).
+uint8_t user_brightness();
+
+// Apply auto-dim / blank-out based on how long since the last user activity.
+// idle_ms < AUTO_DIM_MS         → full user brightness
+// AUTO_DIM_MS ≤ idle < BLANK_MS → dim (10 % of user)
+// idle_ms ≥ AUTO_BLANK_MS       → off
+// Cheap to call every loop iteration; only writes the panel register on
+// transitions, so this is not a hot path.
+void apply_idle_brightness(uint32_t idle_ms);
+
+constexpr uint32_t AUTO_DIM_MS    = 60UL  * 1000UL;    //  1 min → dim
+constexpr uint32_t AUTO_BLANK_MS  = 300UL * 1000UL;    //  5 min → off
 
 // Returns the back-buffer GFX. Draw your frame here, then call flush().
 // Methods inherit from Arduino_GFX: fillRect, fillCircle, fillEllipse,
@@ -38,6 +54,13 @@ void wait_for_te();
 // Push the back-buffer to the panel in one QSPI burst. Cheap to call back
 // to back; you decide the frame cadence.
 void flush();
+
+// Push only a horizontal band of the canvas (full canvas width, [y, y+h)
+// in canvas-local coords). Useful for press-state animations on a single
+// button where the rest of the screen is unchanged — saves the bulk of
+// the QSPI bandwidth a full flush would burn. Out-of-range (x, y, h)
+// values are clamped.
+void flush_band(int y, int h);
 
 int width();   // canvas width  (panel-equivalent x)
 int height();  // canvas height (NOT panel height — see canvas_panel_y_offset())

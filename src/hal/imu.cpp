@@ -60,11 +60,11 @@ bool read(Sample& out) {
 
 void enable_motion_wake(float threshold_g) {
   if (!s_ok) return;
-  // QMI8658 supports any-motion event with per-axis thresholds. INT2 is
-  // already routed to GPIO 21 by the board; we just need to enable the event
-  // and make sure the chip drives INT2 instead of INT1.
-  // TODO: SensorLib's QMI8658 driver exposes configMotion() but the API is
-  // verbose; punting on wiring this until the screen-manager idle path needs it.
+  // QMI8658 supports any-motion event with per-axis thresholds wired to
+  // INT2 (GPIO 21). Currently main.cpp does the equivalent via polled
+  // |a| comparison — simpler and avoids the verbose configMotion() API.
+  // When we add real light/deep sleep we'll need this for an interrupt-
+  // driven wake source; for now the polled path is good enough.
   (void)threshold_g;
   pinMode(robimon::board::IMU_INT2, INPUT);
 }

@@ -2,10 +2,9 @@
 // Owns the FaceParams state, tween between expressions, and idle behaviors
 // (blink / breathing / saccade).
 //
-// Renders via Arduino_GFX directly (no LVGL yet). When LVGL screens land
-// in stage D, this module will gain a "render into a buffer" mode and the
-// face screen will host that buffer in an lv_canvas. For now it pokes the
-// panel directly through the display HAL.
+// Renders via Arduino_GFX into a PSRAM-backed Arduino_Canvas (the display
+// HAL flushes the canvas band to the QSPI panel in one shot). LVGL was
+// considered early on but never used; it was dropped to save flash + RAM.
 
 #pragma once
 

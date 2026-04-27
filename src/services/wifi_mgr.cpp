@@ -40,9 +40,14 @@ void begin() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);   // we manage credential persistence ourselves via config_store
+  // Modem sleep — drops average current ~30 mA when associated and idle.
+  // The radio still wakes for beacons and our outbound traffic; this just
+  // turns off the receive stage between beacons. Latency cost is single-
+  // digit ms which our state machines absorb without notice.
+  WiFi.setSleep(true);
   s_state = State::DISCONNECTED;
   s_ip[0] = '\0';
-  LOG_I(TAG, "wifi mgr ready");
+  LOG_I(TAG, "wifi mgr ready (modem sleep on)");
 }
 
 bool auto_connect() {

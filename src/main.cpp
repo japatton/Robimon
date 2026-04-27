@@ -54,7 +54,21 @@
 
 namespace {
 struct AlarmFireWatcher { int last_idx = -2; } s_alarm_watcher;
-bool s_setup_mode = false;
+bool     s_setup_mode = false;
+uint32_t s_last_activity_ms = 0;
+
+// Lightweight motion watcher — uses the IMU accel polling that stats already
+// does. We compare each sample's magnitude to a running mean; a sudden
+// deviation (kid bumps the desk, picks Robimon up) counts as user activity
+// and wakes the screen out of dim/blank. Lower-power than the QMI8658's
+// interrupt-driven wake-on-motion, but doesn't require touching the
+// IDF wake source plumbing.
+struct MotionWatch {
+  float    mean_g  = 1.0f;     // gravity baseline
+  uint32_t last_check_ms = 0;
+} s_motion;
+constexpr float    MOTION_THRESHOLD_G = 0.20f;
+constexpr uint32_t MOTION_CHECK_MS    = 100;
 }
 
 namespace {
@@ -90,8 +104,9 @@ void setup() {
   if (!robimon::hal::power::begin())   LOG_W(TAG, "PMIC not ready");
 
   if (!robimon::hal::display::begin()) {
-    LOG_E(TAG, "display init failed; halting");
-    while (true) { delay(1000); }
+    LOG_E(TAG, "display init failed; restarting");
+    delay(1000);
+    ESP.restart();
   }
 
   if (!robimon::hal::touch::begin())   LOG_W(TAG, "touch not ready");
@@ -184,6 +199,10 @@ void setup() {
 
   robimon::stats::begin();
 
+  // Start the idle timer at "now" so we don't immediately dim before the
+  // user has a chance to interact.
+  s_last_activity_ms = millis();
+
 #if defined(ROBIMON_BOOT_TEST_TONE) && (ROBIMON_BOOT_TEST_TONE == 1)
   if (robimon::hal::audio::ok()) {
     LOG_I(TAG, "playing boot test tone");
@@ -204,9 +223,11 @@ void loop() {
     robimon::stats::note_frame();
     robimon::stats::tick();
     esp_task_wdt_reset();
-    delay(5);
+    vTaskDelay(pdMS_TO_TICKS(5));
     return;
   }
+
+  const uint32_t now_ms = millis();
 
   // Read touch and feed it to the gesture detector. Events route through
   // the screen manager to the active screen (or to nav, in the case of
@@ -216,6 +237,38 @@ void loop() {
   robimon::ui::gestures::Point gp{ n > 0 ? hw_pts[0].x : (int16_t)0,
                                     n > 0 ? hw_pts[0].y : (int16_t)0 };
   const auto event = robimon::ui::gestures::update(n, gp);
+
+  // Activity tracking for the auto-dim / blank logic. Any touch counts;
+  // an active alarm or voice round-trip also counts (so the screen doesn't
+  // dim mid-conversation). Every-iteration call is cheap because the
+  // display HAL only writes the panel register on transitions.
+  if (n > 0
+      || robimon::services::alarm_mgr::any_firing()
+      || robimon::services::voice::state() != robimon::services::voice::State::IDLE) {
+    s_last_activity_ms = now_ms;
+  }
+
+  // Motion-as-activity: poll the IMU at ~10 Hz; large excursions from the
+  // running gravity baseline count as a wake event. Cheap on the bus
+  // (one I2C burst at 10 Hz) and doesn't require dedicated hardware INT
+  // routing.
+  if (now_ms - s_motion.last_check_ms >= MOTION_CHECK_MS) {
+    s_motion.last_check_ms = now_ms;
+    robimon::hal::imu::Sample s;
+    if (robimon::hal::imu::read(s)) {
+      const float mag = sqrtf(s.ax * s.ax + s.ay * s.ay + s.az * s.az);
+      const float delta = mag > s_motion.mean_g ? mag - s_motion.mean_g
+                                                 : s_motion.mean_g - mag;
+      if (delta > MOTION_THRESHOLD_G) {
+        s_last_activity_ms = now_ms;
+      }
+      // Slow exponential mean — recovers gravity baseline after orientation
+      // changes without making the threshold trip on slow re-orientation.
+      s_motion.mean_g = s_motion.mean_g * 0.95f + mag * 0.05f;
+    }
+  }
+
+  robimon::hal::display::apply_idle_brightness(now_ms - s_last_activity_ms);
 
   // While an alarm is firing, taps dismiss and swipes snooze (per spec).
   // This routing happens BEFORE the regular screen_mgr dispatch so we can
@@ -305,5 +358,8 @@ void loop() {
   robimon::stats::note_frame();
   robimon::stats::tick();
   esp_task_wdt_reset();   // kick the dog every iteration
-  delay(2);
+  // Yield to FreeRTOS rather than busy-spinning so equal-priority tasks get
+  // their share. The face renderer caps frames at 30 FPS internally — this
+  // delay just relaxes the polling rate of touch + state machines.
+  vTaskDelay(pdMS_TO_TICKS(2));
 }
