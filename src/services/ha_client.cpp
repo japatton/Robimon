@@ -112,9 +112,17 @@ void apply_state_object(JsonObjectConst obj) {
   EntityState* e = find_entity(entity_id);
   if (!e) return;   // not tracked
   const char* st = obj["state"];
-  const char* fn = obj["attributes"]["friendly_name"];
+  JsonObjectConst attrs = obj["attributes"];
+  const char* fn = attrs["friendly_name"];
   if (st) { strncpy(e->state, st, MAX_STATE_LEN); e->state[MAX_STATE_LEN] = '\0'; }
   if (fn) { strncpy(e->friendly_name, fn, MAX_NAME_LEN); e->friendly_name[MAX_NAME_LEN] = '\0'; }
+
+  // Light attrs — present when the entity is a light, absent (= -1) otherwise.
+  e->brightness             = attrs["brightness"]             | -1;
+  e->color_temp_kelvin      = attrs["color_temp_kelvin"]      | -1;
+  e->min_color_temp_kelvin  = attrs["min_color_temp_kelvin"]  | -1;
+  e->max_color_temp_kelvin  = attrs["max_color_temp_kelvin"]  | -1;
+
   e->received_ms = millis();
   e->valid = true;
 }
@@ -281,6 +289,45 @@ const EntityState* get_state(const char* entity_id) {
   EntityState* e = find_entity(entity_id);
   if (!e || !e->valid) return nullptr;
   return e;
+}
+
+bool call_service(const char* domain, const char* service, const char* entity_id) {
+  if (s_state != State::CONNECTED) return false;
+  if (!domain || !service || !entity_id) return false;
+
+  JsonDocument doc;
+  doc["id"]                   = s_next_msg_id++;
+  doc["type"]                 = "call_service";
+  doc["domain"]               = domain;
+  doc["service"]              = service;
+  doc["target"]["entity_id"]  = entity_id;
+
+  String out;
+  serializeJson(doc, out);
+  s_ws.sendTXT(out);
+  LOG_I(TAG, "call_service %s.%s -> %s", domain, service, entity_id);
+  return true;
+}
+
+bool light_turn_on(const char* entity_id, int brightness, int color_temp_kelvin) {
+  if (s_state != State::CONNECTED || !entity_id) return false;
+  JsonDocument doc;
+  doc["id"]                   = s_next_msg_id++;
+  doc["type"]                 = "call_service";
+  doc["domain"]               = "light";
+  doc["service"]              = "turn_on";
+  doc["target"]["entity_id"]  = entity_id;
+  if (brightness        >= 0) doc["service_data"]["brightness"]        = brightness;
+  if (color_temp_kelvin >= 0) doc["service_data"]["color_temp_kelvin"] = color_temp_kelvin;
+  String out;
+  serializeJson(doc, out);
+  s_ws.sendTXT(out);
+  LOG_I(TAG, "light.turn_on %s b=%d k=%d", entity_id, brightness, color_temp_kelvin);
+  return true;
+}
+
+bool light_turn_off(const char* entity_id) {
+  return call_service("light", "turn_off", entity_id);
 }
 
 }  // namespace robimon::services::ha_client

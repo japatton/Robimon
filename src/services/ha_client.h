@@ -38,6 +38,13 @@ struct EntityState {
   char     state[MAX_STATE_LEN + 1];
   uint32_t received_ms;       // millis() when this state was received
   bool     valid;
+
+  // Light-specific attributes. -1 means "not present in this entity's
+  // attributes" (e.g., a sensor won't have brightness).
+  int      brightness;             // 0..255
+  int      color_temp_kelvin;      // current
+  int      min_color_temp_kelvin;
+  int      max_color_temp_kelvin;
 };
 
 void begin();
@@ -59,5 +66,16 @@ bool track_entity(const char* entity_id);
 
 // Returns nullptr if not tracked or no state received yet.
 const EntityState* get_state(const char* entity_id);
+
+// Send a service call to HA. Returns false if not connected or args bad.
+//   call_service("light", "toggle", "light.kitchen");
+//   call_service("script", "turn_on", "script.bedtime");
+bool call_service(const char* domain, const char* service, const char* entity_id);
+
+// Light helpers — pass -1 for any field you don't want to change.
+//   light_turn_on("light.kitchen", /*brightness=*/200);
+//   light_turn_on("light.kitchen", /*brightness=*/-1, /*kelvin=*/4000);
+bool light_turn_on(const char* entity_id, int brightness = -1, int color_temp_kelvin = -1);
+bool light_turn_off(const char* entity_id);
 
 }  // namespace robimon::services::ha_client

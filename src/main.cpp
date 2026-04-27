@@ -45,10 +45,15 @@
 #include "services/alarm_mgr.h"
 #include "services/ha_client.h"
 #include "services/serial_console.h"
+#include "services/setup_portal.h"
+#include "screens/setup_screen.h"
 #include "app/log.h"
 #include "app/stats.h"
 
-namespace { struct AlarmFireWatcher { int last_idx = -2; } s_alarm_watcher; }
+namespace {
+struct AlarmFireWatcher { int last_idx = -2; } s_alarm_watcher;
+bool s_setup_mode = false;
+}
 
 namespace {
 constexpr const char* TAG = "main";
@@ -76,6 +81,45 @@ void setup() {
   if (!robimon::hal::imu::begin())     LOG_W(TAG, "IMU not ready");
   if (!robimon::hal::audio::begin())   LOG_W(TAG, "audio not ready");
   if (!robimon::services::config::begin()) LOG_W(TAG, "config store not ready");
+
+  // Setup-mode routing. Two signals:
+  //   force_setup  — one-shot flag set by the about-screen "rerun setup"
+  //                  button. Takes priority and is cleared on this boot.
+  //   configured   — long-lived flag set when setup completes successfully.
+  //
+  // Without force_setup: enter setup mode iff configured is 0. The grace
+  // path also marks configured=1 on the first boot of this firmware for
+  // users who already had wifi creds via the serial console.
+  const bool force_setup = robimon::services::config::get_uint("force_setup", 0) != 0;
+  if (force_setup) {
+    LOG_I(TAG, "force_setup flag — entering setup mode");
+    robimon::services::config::set_uint("force_setup", 0);
+    s_setup_mode = true;
+  } else {
+    s_setup_mode = robimon::services::config::get_uint("configured", 0) == 0;
+    if (s_setup_mode) {
+      char existing_ssid[33] = {0};
+      if (robimon::services::config::get_string("wifi_ssid", existing_ssid, sizeof(existing_ssid)) > 0) {
+        LOG_I(TAG, "existing wifi creds present — marking configured");
+        robimon::services::config::set_uint("configured", 1);
+        s_setup_mode = false;
+      }
+    }
+  }
+
+  if (s_setup_mode) {
+    LOG_I(TAG, "no config in NVS — entering setup mode");
+    robimon::services::setup_portal::begin();
+    robimon::services::serial_console::begin();   // still useful in setup mode
+
+    robimon::face::begin();
+    robimon::face::enable_demo_cycle(false);
+    robimon::ui::screen_mgr::begin();
+    robimon::ui::screen_mgr::add_screen(&robimon::screens::setup_screen);
+    robimon::stats::begin();
+    LOG_I(TAG, "setup mode ready");
+    return;
+  }
 
   robimon::services::wifi_mgr::begin();
   // Best-effort auto-connect using whatever creds are saved in NVS. Silent
@@ -131,6 +175,18 @@ void setup() {
 }
 
 void loop() {
+  if (s_setup_mode) {
+    // Setup mode: only the portal + serial console + screen render.
+    // Touch is ignored (the user is on their phone, not the device).
+    robimon::services::setup_portal::update(millis());
+    robimon::services::serial_console::update(millis());
+    robimon::ui::screen_mgr::update(millis());
+    robimon::stats::note_frame();
+    robimon::stats::tick();
+    delay(5);
+    return;
+  }
+
   // Read touch and feed it to the gesture detector. Events route through
   // the screen manager to the active screen (or to nav, in the case of
   // swipes).

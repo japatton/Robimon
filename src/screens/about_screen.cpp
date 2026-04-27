@@ -1,11 +1,13 @@
 #include "about_screen.h"
 #include "../hal/display.h"
+#include "../services/config_store.h"
 #include "../app/log.h"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 #include <esp_partition.h>
 #include <string.h>
@@ -25,8 +27,12 @@ constexpr int CW       = 466;
 constexpr int CENTER_X = CW / 2;
 constexpr int BUTTON_H = 32;
 constexpr int BACK_W   = 96;
-constexpr int OTA_W    = 110;
-constexpr int OTA_Y    = 250;
+constexpr int OTA_W    = 130;
+constexpr int RERUN_W  = 130;
+constexpr int ACTIONS_Y = 230;
+// OTA on the left, "rerun setup" on the right
+constexpr int OTA_X    = CENTER_X - 8 - OTA_W;
+constexpr int RERUN_X  = CENTER_X + 8;
 
 void draw_centered_text(Arduino_GFX* g, int y, int sz, uint16_t color, const char* s) {
   g->setTextColor(color);
@@ -110,8 +116,23 @@ void AboutScreen::update(uint32_t now_ms) {
     draw_label_value(g, 180, "app", buf);
   }
 
-  // OTA stub button
-  draw_centered_button(g, OTA_Y, OTA_W, BUTTON_H, COLOR_DIM, "OTA (soon)");
+  // Action row: OTA stub + rerun setup
+  // OTA (left)
+  g->drawRoundRect(OTA_X,     ACTIONS_Y,     OTA_W,     BUTTON_H,     6, COLOR_DIM);
+  g->drawRoundRect(OTA_X + 1, ACTIONS_Y + 1, OTA_W - 2, BUTTON_H - 2, 5, COLOR_DIM);
+  g->setTextColor(COLOR_DIM);
+  g->setTextSize(2);
+  g->setCursor(OTA_X + OTA_W / 2 - (int)strlen("OTA (soon)") * 12 / 2,
+               ACTIONS_Y + BUTTON_H / 2 - 8);
+  g->print("OTA (soon)");
+
+  // Rerun setup (right)
+  g->drawRoundRect(RERUN_X,     ACTIONS_Y,     RERUN_W,     BUTTON_H,     6, COLOR_FG);
+  g->drawRoundRect(RERUN_X + 1, ACTIONS_Y + 1, RERUN_W - 2, BUTTON_H - 2, 5, COLOR_FG);
+  g->setTextColor(COLOR_FG);
+  g->setCursor(RERUN_X + RERUN_W / 2 - (int)strlen("rerun setup") * 12 / 2,
+               ACTIONS_Y + BUTTON_H / 2 - 8);
+  g->print("rerun setup");
 
   draw_centered_button(g, 320 - BUTTON_H - 8, BACK_W, BUTTON_H, COLOR_FG, "back");
   ::robimon::hal::display::flush();
@@ -129,10 +150,22 @@ void AboutScreen::on_tap(int panel_x, int panel_y) {
   }
 
   // OTA stub — logs only for now.
-  if (panel_x >= CENTER_X - OTA_W / 2 && panel_x < CENTER_X + OTA_W / 2 &&
-      canvas_y >= OTA_Y && canvas_y < OTA_Y + BUTTON_H) {
+  if (panel_x >= OTA_X && panel_x < OTA_X + OTA_W &&
+      canvas_y >= ACTIONS_Y && canvas_y < ACTIONS_Y + BUTTON_H) {
     LOG_I(TAG, "OTA tapped — not implemented yet");
     return;
+  }
+
+  // Rerun setup — set the one-shot force_setup flag and reboot. main.cpp's
+  // setup-mode routing honors that flag regardless of saved creds, so the
+  // device drops into the SoftAP portal even though wifi/ha credentials are
+  // still present. Alarms, brightness, etc. stay intact.
+  if (panel_x >= RERUN_X && panel_x < RERUN_X + RERUN_W &&
+      canvas_y >= ACTIONS_Y && canvas_y < ACTIONS_Y + BUTTON_H) {
+    LOG_I(TAG, "rerun setup -> reboot");
+    ::robimon::services::config::set_uint("force_setup", 1);
+    delay(300);
+    ESP.restart();
   }
 }
 

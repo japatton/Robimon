@@ -4,6 +4,45 @@ All notable changes to Robimon firmware are recorded here. Format loosely follow
 
 ## [Unreleased]
 
+## [0.11.0-setup-I] — 2026-04-26
+
+### Added
+- `services/setup_portal` — first-run captive portal. Hosts an open
+  SoftAP `Robimon-Setup`, a DNS server that points everything at the
+  device, and an HTTP server with a single self-contained setup page.
+  Form collects WiFi (with live async scan), timezone (8 US presets),
+  HA URL/token/entity. Submit → save to NVS → `configured = 1` →
+  reboot into normal mode. iOS/Android captive-portal probes get a
+  302 to the setup page so the form pops automatically on connect.
+- `screens/setup_screen` — on-device instructions during setup mode
+  (AP name + URL + heartbeat).
+- About screen gains a **rerun setup** button that sets a one-shot
+  `force_setup` flag and reboots. The flag takes priority over the
+  long-lived `configured` check on next boot, so the device drops
+  into the portal even though wifi/ha credentials are still present.
+  Existing-user grace path: on first boot of this firmware, if
+  WiFi creds are already present in NVS (e.g., set via the serial
+  console), `configured` is set automatically so the device doesn't
+  drop into the portal unnecessarily.
+- HA entity screen tap-to-control: `light` → opens a control modal,
+  other supported domains (switch, fan, input_boolean, media_player,
+  cover, automation, script, scene) call their default service
+  (toggle / trigger / turn_on) directly. Sensors and binary sensors
+  remain read-only.
+- `screens/light_control_screen` — modal with a big ON/OFF button,
+  brightness `-`/`+` slider (step 25), and color-temp `-`/`+` slider
+  (step 500 K, only shown when the entity reports
+  `min_color_temp_kelvin` / `max_color_temp_kelvin`).
+- `ha_client::call_service`, `ha_client::light_turn_on`,
+  `ha_client::light_turn_off` for sending service calls. EntityState
+  now also tracks `brightness`, `color_temp_kelvin`, and the kelvin
+  range so the light modal can render its bars correctly.
+
+### Notes
+- Color (HSV/RGB) light control is deferred. Picking colors on a
+  small round touchscreen needs a real picker UX; the toggle +
+  brightness + color-temp covers ~90 % of common interactions.
+
 ## [0.10.0-ha-H] — 2026-04-26
 
 ### Added
