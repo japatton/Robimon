@@ -38,29 +38,48 @@ void AlarmsScreen::update(uint32_t now_ms) {
   g->setTextSize(4);
   const char* hdr = "alarms";
   const int hdr_w = (int)strlen(hdr) * 24;
-  g->setCursor(cx - hdr_w / 2, 30);
+  g->setCursor(cx - hdr_w / 2, 24);
   g->print(hdr);
 
-  // Empty-state message
+  // Bell illustration. A rounded bell body (top arc + rectangular base)
+  // and a small clapper below; outlined so it reads at distance and
+  // doesn't fight the cyan-on-black aesthetic.
+  const int bell_cy = 110;
+  const int bell_w  = 56;
+  const int bell_h  = 60;
+  // Top hemisphere (semi-circle)
+  g->fillCircle(cx, bell_cy, bell_w / 2, COLOR_FG);
+  g->fillRect(cx - bell_w / 2, bell_cy, bell_w, 1, COLOR_FG);
+  // Body — rounded rectangle below the dome
+  g->fillRoundRect(cx - bell_w / 2 - 4, bell_cy, bell_w + 8, bell_h - 28, 4, COLOR_FG);
+  // Cut out the inside so the bell is an outline rather than a slab
+  g->fillCircle(cx, bell_cy, bell_w / 2 - 4, COLOR_BG);
+  g->fillRoundRect(cx - bell_w / 2, bell_cy, bell_w, bell_h - 32, 2, COLOR_BG);
+  // Lip + clapper
+  g->fillRoundRect(cx - bell_w / 2 - 6, bell_cy + bell_h - 32,
+                   bell_w + 12, 6, 2, COLOR_FG);
+  g->fillCircle(cx, bell_cy + bell_h - 18, 4, COLOR_FG);
+
+  // Empty-state message — bright, large, friendly. Spells out the path
+  // (long-press → settings → alarms → add) so a kid who lands here cold
+  // knows what to do next.
+  g->setTextSize(3);
+  g->setTextColor(COLOR_FG);
+  const char* line1 = "no alarms yet!";
+  const int   l1_w  = (int)strlen(line1) * 18;
+  g->setCursor(cx - l1_w / 2, 188);
+  g->print(line1);
+
   g->setTextSize(2);
   g->setTextColor(COLOR_DIM);
-  const char* empty1 = "no alarms set";
-  const char* empty2 = "add from settings";
-  const int e1_w = (int)strlen(empty1) * 12;
-  const int e2_w = (int)strlen(empty2) * 12;
-  g->setCursor(cx - e1_w / 2, g->height() / 2 - 16);
-  g->print(empty1);
-  g->setCursor(cx - e2_w / 2, g->height() / 2 + 8);
-  g->print(empty2);
-
-  // Heartbeat: time on this screen, ticking up each second. Confirms the
-  // screen is alive (not frozen) and the swipe-back path actually leaves it.
-  const uint32_t secs_here = (now_ms - appeared_ms_) / 1000;
-  char buf[32];
-  snprintf(buf, sizeof(buf), "%lus on this screen", (unsigned long)secs_here);
-  const int b_w = (int)strlen(buf) * 12;
-  g->setCursor(cx - b_w / 2, g->height() - 50);
-  g->print(buf);
+  const char* line2 = "hold the screen";
+  const char* line3 = "to open settings";
+  const int   l2_w  = (int)strlen(line2) * 12;
+  const int   l3_w  = (int)strlen(line3) * 12;
+  g->setCursor(cx - l2_w / 2, 232);
+  g->print(line2);
+  g->setCursor(cx - l3_w / 2, 256);
+  g->print(line3);
 
   ::robimon::hal::display::flush();
 }

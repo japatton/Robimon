@@ -68,4 +68,14 @@ void flash_text(const char* text);
 void set_label(const char* text);
 void clear_label();
 
+// Brief white flash on both eyes — visual sibling for the audible "ready"
+// chirp from audio::play_listen_cue(). Universal-design baseline so a kid
+// in a noisy room or with hearing differences gets the same cue.
+void flash_eyes(uint32_t duration_ms = 120);
+
+// Display a depleting arc around the mouth for `window_ms`. Used during
+// voice recording so the kid can see how much time they have left to
+// speak. Pass 0 to clear.
+void start_listening_ring(uint32_t window_ms);
+
 }  // namespace robimon::face

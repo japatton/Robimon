@@ -43,6 +43,12 @@ constexpr int CORNER_CELLS   = 2;       // chamfer K cells from each corner
 int s_face_cy   = 160;   // eyes
 int s_mouth_cy  = 270;   // mouth (centered horizontally)
 
+// Reserve the bottom of the canvas for screen-manager overlays (carousel
+// dots). Face renderers fillRect to FACE_DRAW_BOTTOM rather than fillScreen
+// — clobbering the dots between the face flush and screen_mgr's flush_band
+// otherwise produces a visible flicker at 30 FPS.
+constexpr int FACE_DRAW_BOTTOM = 300;
+
 // Robot "mouth" — a vocoder-style speaker grille that doubles as the
 // voice-mode button. Replaces the kawaii pixel mouth. Centered at the
 // canvas position previously occupied by the mouth.
@@ -60,6 +66,7 @@ constexpr int MOUTH_CX       = PANEL_W / 2;
 //   rather than the near-white cyan of the previous look.
 constexpr uint16_t COLOR_BG       = 0x0000;
 constexpr uint16_t COLOR_EYE      = 0x055F;
+constexpr uint16_t COLOR_EYE_FLASH = 0xFFFF;   // white — listen cue accent
 constexpr uint16_t COLOR_MOUTH    = 0x055F;
 
 // Pixelation: each "logical pixel" is a CELL_PX × CELL_PX block with a 1-px
@@ -293,6 +300,14 @@ const char* s_flash_text = "";
 // Persistent label overlay (e.g., alarm name). Empty string when none.
 char        s_label[28] = {0};
 
+// Voice-flow visual hooks. flash_eyes() draws white eyes for a beat;
+// start_listening_ring() draws a depleting arc around the mouth for the
+// supplied window. Both are owned by the face renderer so screens
+// upstream don't have to re-implement timing logic.
+uint32_t    s_eye_flash_until_ms    = 0;
+uint32_t    s_listen_ring_start_ms  = 0;
+uint32_t    s_listen_ring_window_ms = 0;
+
 // (Double-tap detection lives in the gesture detector now — it emits a
 // DOUBLE_TAP event after a TAP when a quick second tap follows. main.cpp
 // translates that into face::dismiss_menu() + voice::start(). Keeping the
@@ -372,7 +387,9 @@ void draw_pixelated_eye(int cx, int cy, int w, int h, bool is_left,
       if (dy_top < top_depth)         continue;
       if (dy_top > h - bot_depth)     continue;
 
-      g->fillRect(gx, gy, CELL_FILL, CELL_FILL, COLOR_EYE);
+      const uint16_t color = (millis() < s_eye_flash_until_ms)
+                              ? COLOR_EYE_FLASH : COLOR_EYE;
+      g->fillRect(gx, gy, CELL_FILL, CELL_FILL, color);
     }
   }
 }
@@ -417,16 +434,18 @@ void menu_item_center_canvas(int idx, int* out_cx, int* out_cy) {
 
 void draw_menu() {
   Arduino_GFX* g = robimon::hal::display::gfx();
-  g->fillScreen(COLOR_BG);
+  g->fillRect(0, 0, g->width(), FACE_DRAW_BOTTOM, COLOR_BG);
 
   const int center_x = g->width()  / 2;
   const int center_y = g->height() / 2;
 
-  // Center hint at TextSize 2 (12×16 px chars).
+  // Center hint — "how do I feel?" reads as a question to the kid rather
+  // than a command. TextSize 2 (12×16 px chars).
   g->setTextColor(COLOR_EYE);
   g->setTextSize(2);
-  g->setCursor(center_x - 24, center_y - 8);
-  g->print("pick");
+  const char* hint = "how do I feel?";
+  g->setCursor(center_x - (int)(strlen(hint) * 6), center_y - 8);
+  g->print(hint);
 
   // Items: outline ring + centered label at TextSize 3 (18×24 px chars).
   for (int i = 0; i < MENU_COUNT; ++i) {
@@ -470,7 +489,7 @@ void draw_robot_mouth(Arduino_GFX* g) {
 
 void render_face(const FaceParams& p) {
   Arduino_GFX* g = robimon::hal::display::gfx();
-  g->fillScreen(COLOR_BG);
+  g->fillRect(0, 0, g->width(), FACE_DRAW_BOTTOM, COLOR_BG);
 
   const int wl = (int)(EYE_W_BASE * p.left.scale);
   const int hl = (int)(EYE_H_BASE * p.left.scale);
@@ -494,12 +513,33 @@ void render_face(const FaceParams& p) {
     g->print(s_label);
   } else {
     draw_robot_mouth(g);
+
+    // Listening countdown — a depleting arc above the mouth so the kid
+    // can see how long they have left to talk. A top-half semicircle
+    // (rather than a full ring) keeps the arc inside the canvas band
+    // and clear of the bottom dot indicator. Sweeps from 9-o'clock to
+    // 3-o'clock; depletes by shortening from the right side first.
+    if (s_listen_ring_window_ms) {
+      const uint32_t now = millis();
+      const uint32_t elapsed = (now > s_listen_ring_start_ms)
+                                ? now - s_listen_ring_start_ms : 0;
+      if (elapsed >= s_listen_ring_window_ms) {
+        s_listen_ring_window_ms = 0;
+      } else {
+        const float frac = 1.0f - (float)elapsed / (float)s_listen_ring_window_ms;
+        const float sweep = frac * 180.0f;
+        const int   r1 = MOUTH_BTN_W / 2 + 6;
+        const int   r2 = r1 - 4;
+        g->fillArc(g->width() / 2, s_mouth_cy, r1, r2,
+                   -180.0f, -180.0f + sweep, COLOR_EYE);
+      }
+    }
   }
 }
 
 void draw_flash() {
   Arduino_GFX* g = robimon::hal::display::gfx();
-  g->fillScreen(COLOR_BG);
+  g->fillRect(0, 0, g->width(), FACE_DRAW_BOTTOM, COLOR_BG);
   g->setTextColor(COLOR_EYE);
   g->setTextSize(4);   // 24×32 px chars
   const int text_w = (int)strlen(s_flash_text) * 24;
@@ -697,6 +737,15 @@ void set_label(const char* text) {
   s_label[sizeof(s_label) - 1] = '\0';
 }
 void clear_label() { s_label[0] = '\0'; }
+
+void flash_eyes(uint32_t duration_ms) {
+  s_eye_flash_until_ms = millis() + duration_ms;
+}
+
+void start_listening_ring(uint32_t window_ms) {
+  s_listen_ring_start_ms  = millis();
+  s_listen_ring_window_ms = window_ms;
+}
 
 void enable_demo_cycle(bool on) {
   s_demo_on = on;

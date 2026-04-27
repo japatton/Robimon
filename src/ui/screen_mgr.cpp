@@ -1,5 +1,8 @@
 #include "screen_mgr.h"
+#include "../hal/display.h"
 #include "../app/log.h"
+
+#include <Arduino_GFX_Library.h>
 
 namespace robimon::ui::screen_mgr {
 
@@ -19,6 +22,39 @@ int     s_modal_count = 0;
 Screen* active() {
   if (s_modal_count > 0) return s_modals[s_modal_count - 1];
   return (s_count > 0) ? s_screens[s_current] : nullptr;
+}
+
+// Carousel page indicator — N small circles along the bottom of the canvas.
+// Drawn after the screen renders so it overlays whatever the screen drew at
+// the same y. Pushed via flush_band so the rest of the panel isn't touched.
+constexpr int DOT_BAND_Y       = 304;     // canvas-local y for the indicator band
+constexpr int DOT_BAND_H       = 12;
+constexpr int DOT_RADIUS       = 3;
+constexpr int DOT_GAP          = 14;      // spacing between dot centers
+constexpr uint16_t DOT_COLOR_ON  = 0x055F;   // bright cyan
+constexpr uint16_t DOT_COLOR_OFF = 0x01F6;   // dim cyan
+constexpr uint16_t DOT_COLOR_BG  = 0x0000;
+
+void draw_carousel_dots() {
+  if (s_count <= 1 || s_modal_count > 0) return;
+  Arduino_GFX* g = ::robimon::hal::display::gfx();
+  if (!g) return;
+  const int canvas_w = g->width();
+  // Clear the band (overlapping screen content here is acceptable — see the
+  // band-y comment in screen_mgr.h). The dots themselves take over the band.
+  g->fillRect(0, DOT_BAND_Y, canvas_w, DOT_BAND_H, DOT_COLOR_BG);
+  const int total_w = (s_count - 1) * DOT_GAP + 2 * DOT_RADIUS;
+  const int start_x = (canvas_w - total_w) / 2 + DOT_RADIUS;
+  const int y       = DOT_BAND_Y + DOT_BAND_H / 2;
+  for (int i = 0; i < s_count; ++i) {
+    const int x = start_x + i * DOT_GAP;
+    if (i == s_current) {
+      g->fillCircle(x, y, DOT_RADIUS, DOT_COLOR_ON);
+    } else {
+      g->drawCircle(x, y, DOT_RADIUS, DOT_COLOR_OFF);
+    }
+  }
+  ::robimon::hal::display::flush_band(DOT_BAND_Y, DOT_BAND_H);
 }
 
 }  // namespace
@@ -97,6 +133,9 @@ void update(uint32_t now_ms) {
   }
   Screen* a = active();
   if (a) a->update(now_ms);
+  // Overlay carousel page dots after the screen renders. This is a 12-px
+  // band with its own partial flush, so it costs ~1/26 of a full flush.
+  draw_carousel_dots();
 }
 
 void on_tap(int panel_x, int panel_y) {

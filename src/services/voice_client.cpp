@@ -212,6 +212,11 @@ void voice_task(void*) {
   // Audible "ready" cue. The amp settles and the cue is fully drained before
   // we start capturing so the beep doesn't bleed into the recording.
   ::robimon::hal::audio::play_listen_cue();
+  // Visual sibling cues (universal-design baseline so a kid in a noisy room
+  // or with hearing differences gets the same signal): brief eye flash +
+  // a depleting ring around the mouth that runs for the recording window.
+  face::flash_eyes(150);
+  face::start_listening_ring(RECORD_SECONDS * 1000);
   delay(60);
 
   {
