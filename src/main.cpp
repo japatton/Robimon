@@ -49,6 +49,7 @@
 #include "services/setup_portal.h"
 #include "services/voice_client.h"
 #include "services/tutorial.h"
+#include "services/proximity_monitor.h"
 #include "screens/setup_screen.h"
 #include "app/log.h"
 #include "app/stats.h"
@@ -226,6 +227,15 @@ void setup() {
   // dispatch and advances its caption when the user does the right
   // gesture.
   robimon::services::tutorial::begin();
+
+  // Proximity monitor (Phase A: stub callback that just logs). NimBLE
+  // scan + advertise live on a core-0 task; UNPAIRED if no peer MAC is
+  // stored — set with `pair-peer <MAC>` from the serial console.
+  robimon::services::proximity::begin(
+      [](robimon::services::proximity::State new_state, int8_t rssi) {
+        LOG_I(TAG, "proximity stub: %s @ %d dBm",
+              robimon::services::proximity::state_str(new_state), (int)rssi);
+      });
 
   // Boot greeting will fire once SNTP syncs (so we can pick a time-of-day
   // greeting) or after a 6 s grace window if it doesn't. Skipped if the
