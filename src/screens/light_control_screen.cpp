@@ -32,8 +32,11 @@ constexpr int ONOFF_Y = 44;
 
 // Slider rows
 constexpr int LABEL_OFFSET = 18;     // label sits this many px above its slider row
-constexpr int SLIDER_BTN_W = 44;
-constexpr int SLIDER_BTN_H = 32;
+// Bumped from 44×32 to 56×40 per the kid-UX review — child finger pads are
+// ~2–3 cm at the fingertip; the prior 44 px width caused drift onto the
+// slider bar between presses.
+constexpr int SLIDER_BTN_W = 56;
+constexpr int SLIDER_BTN_H = 40;
 constexpr int SLIDER_BAR_H = 22;
 constexpr int SLIDER_BAR_X = 86;
 constexpr int SLIDER_BAR_W = CW - 2 * SLIDER_BAR_X;

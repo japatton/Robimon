@@ -201,7 +201,7 @@ void AlarmEditScreen::render() {
   g->drawRoundRect(en_x + 1, EN_Y + 1, EN_W - 2, EN_H - 2, 5, en_color);
   g->setTextColor(en_color);
   g->setTextSize(2);
-  const char* lbl = staging_.enabled ? "ENABLED" : "OFF";
+  const char* lbl = staging_.enabled ? "ON" : "OFF";
   const int lw = (int)strlen(lbl) * 12;
   g->setCursor(CENTER_X - lw / 2, EN_Y + EN_H / 2 - 8);
   g->print(lbl);

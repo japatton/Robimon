@@ -44,11 +44,12 @@ const char* const SYMBOLS[3] = {
   ".,?!'_+=\x02",      // . , ? ! ' _ + = ⌫
 };
 
-// Geometry — uniform key size; rows centered horizontally. Slightly larger
-// hit targets (40×38 vs the original 40×32) reduce mistaps without forcing
-// a layout reshuffle.
-constexpr int KEY_W    = 40;
-constexpr int KEY_H    = 38;
+// Geometry — uniform key size; rows centered horizontally. Bumped per the
+// kid-UX review from 40×38 to 43×42 (and the 4-key bottom row keeps a
+// little extra room). 10 keys × 43 + 9 × 3 gap = 457 px, comfortable
+// inside the 466 canvas with margin.
+constexpr int KEY_W    = 43;
+constexpr int KEY_H    = 42;
 constexpr int KEY_GAP  = 3;
 constexpr int KBD_TOP_Y = 108;        // canvas-local
 constexpr int ROW_DY   = KEY_H + KEY_GAP;
