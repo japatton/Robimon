@@ -6,6 +6,7 @@
 
 #include <Arduino.h>
 #include <HTTPClient.h>
+#include <WiFi.h>
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -81,17 +82,28 @@ bool post_json(const char* path, const char* body, size_t body_len) {
 
 void process(const Request& r) {
   char body[256];
+  // The companion app needs the bot's local IP to POST /play back to it.
+  // Include it on every event so the server's per-bot IP cache stays
+  // fresh even if the bot's IP changes (DHCP renewal, etc).
+  const IPAddress ip = WiFi.localIP();
+  char ipstr[16];
+  snprintf(ipstr, sizeof(ipstr), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+  const uint16_t port = proximity_config::PLAYBACK_SERVER_PORT;
+
   switch (r.kind) {
     case Kind::PROXIMITY_DETECTED:
       snprintf(body, sizeof(body),
-               "{\"bot_id\":\"%s\",\"rssi\":%d,\"timestamp_ms\":%lu}",
-               s_bot_id, (int)r.rssi, (unsigned long)millis());
+               "{\"bot_id\":\"%s\",\"ip\":\"%s\",\"port\":%u,"
+               "\"rssi\":%d,\"timestamp_ms\":%lu}",
+               s_bot_id, ipstr, (unsigned)port,
+               (int)r.rssi, (unsigned long)millis());
       post_json("/api/proximity/detected", body, strlen(body));
       break;
     case Kind::PROXIMITY_LOST:
       snprintf(body, sizeof(body),
-               "{\"bot_id\":\"%s\",\"timestamp_ms\":%lu}",
-               s_bot_id, (unsigned long)millis());
+               "{\"bot_id\":\"%s\",\"ip\":\"%s\",\"port\":%u,"
+               "\"timestamp_ms\":%lu}",
+               s_bot_id, ipstr, (unsigned)port, (unsigned long)millis());
       post_json("/api/proximity/lost", body, strlen(body));
       break;
     case Kind::PLAYBACK_COMPLETE:
