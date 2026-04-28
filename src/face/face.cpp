@@ -530,13 +530,29 @@ void render(const FaceParams& p) {
   if (!g) return;
 
   switch (s_mode) {
-    case FaceMode::MENU:  draw_menu();      break;
-    case FaceMode::FLASH: draw_flash();     break;
+    case FaceMode::MENU:
+      draw_menu();
+      // Menu items orbit at radius 125 — they reach y ~10 at top and y
+      // ~285 at bottom. Plus the radial-item radius 50, the visible
+      // band is roughly y 0..320. Push the full canvas.
+      robimon::hal::display::flush();
+      break;
+    case FaceMode::FLASH:
+      draw_flash();
+      robimon::hal::display::flush();
+      break;
     case FaceMode::IDLE:
-    default:              render_face(p);   break;
+    default:
+      render_face(p);
+      // Face content lives in y 46..300 — exactly between the caption
+      // band (y 6..42) and the dot indicator (y 304..316), both of
+      // which the screen-manager owns and pushes via its own
+      // flush_band calls. Pushing only the face band saves ~20 % of
+      // QSPI bandwidth at 30 FPS (was 30 ms full-canvas flush; now
+      // ~24 ms for the 254-row band).
+      robimon::hal::display::flush_band(46, FACE_DRAW_BOTTOM - 46);
+      break;
   }
-
-  robimon::hal::display::flush();
 }
 
 // =============================================================================
@@ -654,7 +670,15 @@ void update() {
 
   if (s_prev_mode != FaceMode::IDLE && s_mode == FaceMode::IDLE) {
     Arduino_GFX* g = robimon::hal::display::gfx();
-    if (g) g->fillRect(0, 0, g->width(), FACE_DRAW_BOTTOM, COLOR_BG);
+    if (g) {
+      // Clear the entire canvas — the menu wheel orbits the eye center
+      // at radius ~125 and can draw below FACE_DRAW_BOTTOM (300). Then
+      // push once so the panel reflects the cleared state; the per-frame
+      // render_face flush_band only covers y 46..300, so without this
+      // wipe the dot-band gap rows (y 300..303, y 316..) keep menu pixels.
+      g->fillScreen(COLOR_BG);
+      robimon::hal::display::flush();
+    }
   }
   s_prev_mode = entering;
 

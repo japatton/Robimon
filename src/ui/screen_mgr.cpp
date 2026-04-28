@@ -154,15 +154,19 @@ void set_index(int idx) {
   }
 
   // Wipe the canvas before the new screen renders. The face renderer
-  // intentionally leaves the caption + dot bands alone (to avoid 30-FPS
-  // flicker against the overlays), so without this, anything the
-  // previous screen drew at the top or bottom of the canvas — or
-  // anywhere the new screen doesn't fully overdraw — survives the swap.
-  // fillScreen is just a framebuffer memset (no QSPI), so this is cheap.
-  // Active caption + dots will be re-rendered by their overlays this
-  // same frame.
+  // intentionally leaves the caption + dot bands alone (and only
+  // flushes its middle band y 46..300) — without this, anything the
+  // previous screen drew at the top or bottom of the canvas survives
+  // the swap on the panel even though the canvas itself is clean.
+  // Push the fillScreen result with a full display::flush() so the
+  // panel starts the new screen with a known-black state; subsequent
+  // partial flushes from the new screen + overlays then write only
+  // what they own.
   Arduino_GFX* g = ::robimon::hal::display::gfx();
-  if (g) g->fillScreen(COLOR_BG);
+  if (g) {
+    g->fillScreen(COLOR_BG);
+    ::robimon::hal::display::flush();
+  }
 
   s_current = idx;
   s_initial_appear_done = true;
