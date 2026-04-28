@@ -53,19 +53,24 @@ constexpr uint32_t PROXIMITY_RELEASE_SECONDS = 5;
 // much detection lag.
 constexpr uint8_t  RSSI_SAMPLE_WINDOW = 5;
 
-// BLE scan duty cycle, in percent. window_ms / interval_ms. Lower duty =
-// less radio time = lower power but slower detection. 10% (e.g.,
-// window=100ms, interval=1000ms) is a sane starting point for a battery
-// device that also needs to keep wifi alive.
-constexpr uint8_t  BLE_SCAN_DUTY_CYCLE_PERCENT = 10;
-constexpr uint16_t BLE_SCAN_INTERVAL_MS        = 1000;
+// BLE scan / advertise rates. WiFi+BLE coexistence on the same 2.4 GHz
+// radio means BLE only gets a fraction of the requested airtime — at
+// 50 % duty + 200 ms adv interval we still saw single-digit samples per
+// 3 s dwell. 40 % duty + 200 ms adv keeps detection reasonable without
+// fully starving WiFi.
+constexpr uint8_t  BLE_SCAN_DUTY_CYCLE_PERCENT = 40;
+constexpr uint16_t BLE_SCAN_INTERVAL_MS        = 500;
 constexpr uint16_t BLE_SCAN_WINDOW_MS =
     (uint16_t)(BLE_SCAN_INTERVAL_MS * BLE_SCAN_DUTY_CYCLE_PERCENT / 100);
+constexpr uint16_t BLE_ADV_INTERVAL_MS         = 200;
 
-// BLE advertising interval. Each bot also advertises so the peer can
-// discover it. Slightly off the scan interval to avoid lockstep
-// overlap/missing.
-constexpr uint16_t BLE_ADV_INTERVAL_MS = 800;
+// How long a smoothed RSSI sample stays "valid" before we treat the
+// peer as out of range. Generous (3 s) because BLE+WiFi coexistence
+// makes individual sample reception unreliable — a single good sample
+// needs to bridge the dwell window even if the next several are
+// dropped. Trade-off: peer-actually-gone takes this long to detect
+// before the LEAVING release dwell starts counting.
+constexpr uint32_t SAMPLE_STALE_MS = 3000;
 
 // ---- Conversation session safety ------------------------------------------
 // If no new /play arrives within this many seconds after we ack a

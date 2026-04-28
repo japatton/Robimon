@@ -6,8 +6,7 @@
 #include "../app/log.h"
 
 #include <Arduino.h>
-#include <WebServer.h>
-#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
@@ -26,8 +25,7 @@ constexpr const char* TAG = "play";
 constexpr size_t MAX_INBOUND_BYTES   = 512UL * 1024UL;
 constexpr size_t MAX_RESAMPLED_BYTES = MAX_INBOUND_BYTES * 2UL;   // worst case 8→16 kHz
 
-WebServer*       s_web        = nullptr;
-TaskHandle_t     s_http_task  = nullptr;
+AsyncWebServer*  s_web        = nullptr;
 TaskHandle_t     s_play_task  = nullptr;
 
 // Inbound + resample buffers (PSRAM).
@@ -35,15 +33,20 @@ uint8_t*         s_in_buf       = nullptr;
 size_t           s_in_size      = 0;
 int16_t*         s_resamp_buf   = nullptr;
 
-// Per-play metadata stashed by the http handler for the play worker.
+// Per-play metadata staged by the body handler for the play worker.
 char             s_pending_session[40] = {0};
 uint8_t          s_pending_turn        = 0;
 
-// Synchronization:
-//   s_buf_mux — guards s_in_buf so only one /play uses it at a time
-//   s_play_sem — http handler signals play worker; worker takes it on wake
-SemaphoreHandle_t s_buf_mux  = nullptr;
-SemaphoreHandle_t s_play_sem = nullptr;
+// Synchronization. Both are binary semaphores (not mutexes) — the body
+// handler runs on the AsyncTCP task and the play worker runs on a
+// pinned core-0 task; mutex priority inheritance asserts when the giver
+// isn't the taker.
+//   s_buf_avail — counts as "buffer available for next /play". Taken by
+//                 body handler before accepting a body, given by play
+//                 worker after playback completes.
+//   s_play_sem  — body handler signals play worker after staging.
+SemaphoreHandle_t s_buf_avail = nullptr;
+SemaphoreHandle_t s_play_sem  = nullptr;
 
 volatile bool s_playing = false;
 
@@ -88,7 +91,6 @@ bool parse_wav(const uint8_t* data, size_t len,
   return false;
 }
 
-// Linear resampler to 16 kHz mono int16. Same algorithm as voice_client.
 size_t resample_to_16k(const int16_t* src, size_t src_count, uint32_t src_rate,
                        int16_t* dst, size_t dst_capacity) {
   if (src_rate == 16000) {
@@ -114,124 +116,147 @@ size_t resample_to_16k(const int16_t* src, size_t src_count, uint32_t src_rate,
 }
 
 // ---------------------------------------------------------------------------
-// Body streaming
+// /play — async upload via body callback. AsyncWebServer streams the body
+// in chunks; we copy each chunk into the PSRAM buffer at the supplied
+// index, then on the final chunk validate, acquire audio, stage the
+// metadata, and signal the play worker. The response (202/4xx/5xx) is
+// sent from the request callback after the body callback completes.
 // ---------------------------------------------------------------------------
-size_t read_body(WiFiClient& client, size_t expected) {
-  if (expected > MAX_INBOUND_BYTES) return 0;
-  size_t got = 0;
-  const uint32_t deadline = millis() + 8000;
-  while (got < expected) {
-    if (millis() > deadline) {
-      LOG_W(TAG, "body read timeout @ %u/%u", (unsigned)got, (unsigned)expected);
-      return 0;
-    }
-    if (!client.connected() && client.available() == 0) break;
-    const int avail = client.available();
-    if (avail <= 0) {
-      vTaskDelay(pdMS_TO_TICKS(5));
-      continue;
-    }
-    const size_t want = (size_t)avail < (expected - got) ? (size_t)avail
-                                                          : (expected - got);
-    got += client.readBytes(s_in_buf + got, want);
-    esp_task_wdt_reset();
+
+// Per-request state — captured by the body handler, consumed by the
+// request handler. Stored in a struct attached to the request via
+// _tempObject so it lives across the chunked-body callbacks.
+struct ReqState {
+  bool   accepted = false;
+  bool   error    = false;
+  String error_msg;
+  size_t total_bytes = 0;
+  String session;
+  uint8_t turn = 0;
+};
+
+void on_play_body(AsyncWebServerRequest* req, uint8_t* data, size_t len,
+                  size_t index, size_t total) {
+  ReqState* st = (ReqState*)req->_tempObject;
+  if (!st) {
+    st = new ReqState();
+    req->_tempObject = st;
   }
-  return got;
+
+  if (index == 0) {
+    // First chunk — pull headers, take the buffer, validate.
+    st->total_bytes = total;
+    if (req->hasHeader("X-Session-Id")) {
+      st->session = req->header("X-Session-Id");
+    }
+    if (req->hasHeader("X-Turn-Index")) {
+      st->turn = (uint8_t)req->header("X-Turn-Index").toInt();
+    }
+    LOG_I(TAG, "/play hdr session='%s' turn=%u total=%u",
+          st->session.c_str(), (unsigned)st->turn, (unsigned)total);
+
+    if (st->session.length() == 0) {
+      st->error = true; st->error_msg = "missing X-Session-Id";
+      return;
+    }
+    if (total == 0 || total > MAX_INBOUND_BYTES) {
+      st->error = true; st->error_msg = "bad content length";
+      return;
+    }
+    // Buffer ownership — non-blocking. Returned by play worker after
+    // playback.
+    if (xSemaphoreTake(s_buf_avail, 0) != pdTRUE) {
+      st->error = true; st->error_msg = "playback in progress";
+      return;
+    }
+    st->accepted = true;
+    s_in_size = 0;
+  }
+
+  if (st->error || !st->accepted) {
+    return;   // skip remaining chunks; the request handler will send the error
+  }
+
+  if (index + len > MAX_INBOUND_BYTES) {
+    st->error = true; st->error_msg = "body overflow";
+    xSemaphoreGive(s_buf_avail);
+    st->accepted = false;
+    return;
+  }
+  memcpy(s_in_buf + index, data, len);
+  s_in_size = index + len;
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-void handle_play() {
-  // Validate caller-supplied metadata up front.
-  String session = s_web->header("X-Session-Id");
-  String turn_s  = s_web->header("X-Turn-Index");
-  if (session.length() == 0) {
-    s_web->send(400, "text/plain", "missing X-Session-Id");
+void on_play_request(AsyncWebServerRequest* req) {
+  ReqState* st = (ReqState*)req->_tempObject;
+  // No body handler ran (zero-length POST?) — synthesize an error state.
+  if (!st) {
+    req->send(400, "text/plain", "missing body");
     return;
   }
-  uint8_t turn = (uint8_t)turn_s.toInt();
-
-  // Take the buffer mutex — non-blocking. If a previous /play is still
-  // playing, signal the companion app to back off.
-  if (xSemaphoreTake(s_buf_mux, 0) != pdTRUE) {
-    s_web->send(503, "text/plain", "playback in progress");
+  if (st->error) {
+    req->send(st->error_msg == "playback in progress" ? 503 : 400,
+              "text/plain", st->error_msg);
+    delete st; req->_tempObject = nullptr;
     return;
   }
-
-  const int content_len = s_web->header("Content-Length").toInt();
-  if (content_len <= 0 || (size_t)content_len > MAX_INBOUND_BYTES) {
-    s_web->send(400, "text/plain", "bad content length");
-    xSemaphoreGive(s_buf_mux);
+  if (s_in_size != st->total_bytes) {
+    req->send(400, "text/plain", "incomplete body");
+    if (st->accepted) xSemaphoreGive(s_buf_avail);
+    delete st; req->_tempObject = nullptr;
     return;
   }
 
-  WiFiClient& client = s_web->client();
-  s_in_size = read_body(client, (size_t)content_len);
-  if (s_in_size == 0) {
-    s_web->send(400, "text/plain", "body read failed");
-    xSemaphoreGive(s_buf_mux);
+  // Session policy gating + audio arbitration happen here, after the
+  // body has fully arrived. If either gate rejects, we release the
+  // buffer and respond.
+  if (!conversation_session::note_play_received(st->session.c_str(), st->turn)) {
+    req->send(409, "text/plain", "session policy rejected");
+    xSemaphoreGive(s_buf_avail);
+    delete st; req->_tempObject = nullptr;
     return;
   }
-
-  // Session policy (idle timeout, max-turns) gates whether we accept.
-  if (!conversation_session::note_play_received(session.c_str(), turn)) {
-    s_web->send(409, "text/plain", "session policy rejected");
-    xSemaphoreGive(s_buf_mux);
-    return;
-  }
-
-  // Audio path arbitration. Alarm + voice both out-rank proximity; if
-  // either is active we tell the companion app and bail.
   if (!::robimon::hal::audio::try_acquire(::robimon::hal::audio::Owner::PROXIMITY)) {
     LOG_W(TAG, "audio owned by higher priority — dropping play");
-    companion_client::send_playback_error(session.c_str(), "audio_busy");
-    s_web->send(503, "text/plain", "audio busy");
-    xSemaphoreGive(s_buf_mux);
+    companion_client::send_playback_error(st->session.c_str(), "audio_busy");
+    req->send(503, "text/plain", "audio busy");
+    xSemaphoreGive(s_buf_avail);
+    delete st; req->_tempObject = nullptr;
     return;
   }
 
-  // Stash session metadata for the worker, signal it.
-  strncpy(s_pending_session, session.c_str(), sizeof(s_pending_session) - 1);
+  // Stage metadata for the worker, signal it.
+  strncpy(s_pending_session, st->session.c_str(), sizeof(s_pending_session) - 1);
   s_pending_session[sizeof(s_pending_session) - 1] = '\0';
-  s_pending_turn = turn;
+  s_pending_turn = st->turn;
   s_playing      = true;
 
   xSemaphoreGive(s_play_sem);
-  s_web->send(202, "text/plain", "accepted");
+  req->send(202, "text/plain", "accepted");
+
+  delete st; req->_tempObject = nullptr;
 }
 
-void handle_stop() {
+void on_stop_request(AsyncWebServerRequest* req) {
   conversation_session::end_session("/stop");
-  // Signal "session ended" — the play worker checks s_playing periodically.
-  // A more aggressive preempt would acquire ALARM-priority then drop it,
-  // but for now we let the current chunk finish.
   s_playing = false;
-  s_web->send(200, "text/plain", "stopped");
+  req->send(200, "text/plain", "stopped");
 }
 
-void handle_status() {
+void on_status_request(AsyncWebServerRequest* req) {
   char buf[160];
   snprintf(buf, sizeof(buf),
            "{\"bot_id\":\"%s\",\"playing\":%s,\"current_session\":\"%s\"}",
            companion_client::bot_id(),
            s_playing ? "true" : "false",
            conversation_session::current_session_id());
-  s_web->send(200, "application/json", buf);
+  req->send(200, "application/json", buf);
 }
 
 // ---------------------------------------------------------------------------
-// Tasks
+// Play worker — drains a binary semaphore, plays the staged audio,
+// notifies the companion, releases the buffer.
 // ---------------------------------------------------------------------------
-void http_task(void*) {
-  esp_task_wdt_add(NULL);
-  for (;;) {
-    s_web->handleClient();
-    vTaskDelay(pdMS_TO_TICKS(20));
-    esp_task_wdt_reset();
-  }
-}
-
 void play_task(void*) {
   esp_task_wdt_add(NULL);
   char    cur_session[40] = {0};
@@ -241,9 +266,6 @@ void play_task(void*) {
       esp_task_wdt_reset();
       continue;
     }
-
-    // Snapshot the metadata under the buffer mutex (which the http handler
-    // currently holds — we'll release it after we're done).
     strncpy(cur_session, s_pending_session, sizeof(cur_session) - 1);
     cur_session[sizeof(cur_session) - 1] = '\0';
     cur_turn = s_pending_turn;
@@ -282,27 +304,24 @@ void play_task(void*) {
       esp_task_wdt_reset();
     }
 
-    // Success — release audio + buffer, ack the companion.
     ::robimon::hal::audio::release(::robimon::hal::audio::Owner::PROXIMITY);
     s_playing = false;
     conversation_session::note_playback_complete();
     companion_client::send_playback_complete(cur_session, cur_turn);
-    xSemaphoreGive(s_buf_mux);
+    xSemaphoreGive(s_buf_avail);
     continue;
 
 fail:
     ::robimon::hal::audio::release(::robimon::hal::audio::Owner::PROXIMITY);
     s_playing = false;
     companion_client::send_playback_error(cur_session, "decode_or_play_failed");
-    xSemaphoreGive(s_buf_mux);
+    xSemaphoreGive(s_buf_avail);
   }
 }
 
 }  // namespace
 
 bool begin() {
-  // PSRAM buffers — sized once, lived forever. Same approach as voice_client
-  // (avoids per-/play malloc churn that would fragment PSRAM).
   s_in_buf = (uint8_t*)heap_caps_malloc(MAX_INBOUND_BYTES, MALLOC_CAP_SPIRAM);
   s_resamp_buf = (int16_t*)heap_caps_malloc(MAX_RESAMPLED_BYTES, MALLOC_CAP_SPIRAM);
   if (!s_in_buf || !s_resamp_buf) {
@@ -312,25 +331,27 @@ bool begin() {
   LOG_I(TAG, "buffers ready (in=%u resamp=%u)",
         (unsigned)MAX_INBOUND_BYTES, (unsigned)MAX_RESAMPLED_BYTES);
 
-  s_buf_mux  = xSemaphoreCreateMutex();
-  s_play_sem = xSemaphoreCreateBinary();
-  if (!s_buf_mux || !s_play_sem) {
+  // Binary semaphores — safe to give from a different task than took.
+  // s_buf_avail starts as available (buffer free, ready for first /play).
+  s_buf_avail = xSemaphoreCreateBinary();
+  s_play_sem  = xSemaphoreCreateBinary();
+  if (!s_buf_avail || !s_play_sem) {
     LOG_E(TAG, "semaphore create failed");
     return false;
   }
+  xSemaphoreGive(s_buf_avail);
 
-  s_web = new WebServer(proximity_config::PLAYBACK_SERVER_PORT);
-  s_web->collectHeaders((const char*[]){ "X-Session-Id", "X-Turn-Index", "Content-Length" }, 3);
-  s_web->on("/play",   HTTP_POST, handle_play);
-  s_web->on("/stop",   HTTP_POST, handle_stop);
-  s_web->on("/status", HTTP_GET,  handle_status);
+  s_web = new AsyncWebServer(proximity_config::PLAYBACK_SERVER_PORT);
+  s_web->on("/play", HTTP_POST, on_play_request,
+            /*onUpload=*/nullptr,
+            /*onBody  =*/on_play_body);
+  s_web->on("/stop",   HTTP_POST, on_stop_request);
+  s_web->on("/status", HTTP_GET,  on_status_request);
   s_web->begin();
   LOG_I(TAG, "listening on :%u", (unsigned)proximity_config::PLAYBACK_SERVER_PORT);
 
-  xTaskCreatePinnedToCore(http_task, "play_http", 6144, nullptr, /*priority=*/1,
-                           &s_http_task, /*core=*/0);
-  xTaskCreatePinnedToCore(play_task, "play_audio", 6144, nullptr, /*priority=*/1,
-                           &s_play_task, /*core=*/0);
+  xTaskCreatePinnedToCore(play_task, "play_audio", 6144, nullptr,
+                           /*priority=*/1, &s_play_task, /*core=*/0);
   return true;
 }
 

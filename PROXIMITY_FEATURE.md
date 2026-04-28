@@ -200,6 +200,17 @@ Test:
 
 ## Known TODOs / limitations
 
+- **Duplicate `playback_complete` POSTs.** `CompanionAppClient` retries
+  on what it thinks is a failed POST, but the request often actually
+  succeeded (response just timed out before being parsed). Server sees
+  two completes for the same turn, dispatches the next turn twice. End
+  result: one extra TTS generation per turn. Cosmetic; needs response-
+  body draining or an idempotency key.
+- **Turn-N dispatch can race the previous turn's playback complete.**
+  If the next turn's POST arrives before the bot finishes the previous
+  one, the bot returns 503 (`playback in progress`) and the orchestrator
+  ends the session. Workaround: companion could wait briefly after
+  receiving `playback_complete` before dispatching the next turn.
 - **No auth on `/play`.** Anyone on the LAN can POST audio to a bot.
   Acceptable for a closed home network; for shared/public networks,
   add a shared-secret header check (proposed: `X-Robimon-Auth: <key>`
@@ -222,3 +233,31 @@ Test:
 - **Hardware IMU wake-on-motion still polled.** ESP32-S3's QMI8658
   supports interrupt-driven wake, but we poll at 10 Hz instead. Move
   to interrupt when light/deep sleep lands.
+
+## Debugging notes from first end-to-end bring-up
+
+Two non-obvious gotchas surfaced during the first 2-device test and
+shaped the current implementation:
+
+1. **`NimBLEAddress::operator==` checks the address TYPE field**
+   (public vs. random vs. resolvable) in addition to the 6 bytes. With
+   ESP32-S3 controllers occasionally varying the type per session,
+   the comparison silently failed in one direction. The scan callback
+   now compares raw 6 bytes only, which is the requirement's intent.
+
+2. **Arduino's stock `WebServer` truncates large binary POST bodies.**
+   Its auto-body-read for non-form Content-Types uses
+   `client.readString()` with a 1-second timeout, which on slow LAN
+   uploads cuts a 70 KB WAV down to ~7 bytes. Switched to
+   `ESPAsyncWebServer` for the playback endpoint — its onBody callback
+   streams the request in chunks reliably. Also: don't use
+   `xSemaphoreCreateMutex` for cross-task signalling — the priority-
+   inheritance assert fires when the giver isn't the taker. Use
+   `xSemaphoreCreateBinary` for that pattern.
+
+3. **BLE+WiFi coexistence on this chip is bouncy.** Even at 40 % scan
+   duty cycle and 200 ms advertising interval, individual sample
+   reception is unreliable. The state machine treats "no fresh sample"
+   as not-conclusive evidence — it requires a *fresh* sample below
+   release threshold to fall back from APPROACHING / IN_PROXIMITY,
+   and the dwell promotion to IN_PROXIMITY beats the staleness check.

@@ -68,7 +68,17 @@ class ScanCB : public NimBLEScanCallbacks {
  public:
   void onResult(const NimBLEAdvertisedDevice* dev) override {
     if (!s_has_peer) return;
-    if (dev->getAddress() != s_peer_addr) return;
+    // Compare by raw 6 bytes only — NimBLEAddress::operator== also checks
+    // the address TYPE (public vs. random vs. resolvable), and one bot
+    // advertising as resolvable while we stored as public would silently
+    // fail to match. Bytes-only is what the requirement intends.
+    const uint8_t* native = dev->getAddress().getBase()->val;   // little-endian
+    bool match = true;
+    for (int i = 0; i < 6; ++i) {
+      // s_peer_mac is big-endian (display order); native is reversed.
+      if (native[i] != s_peer_mac[5 - i]) { match = false; break; }
+    }
+    if (!match) return;
     const int rssi = dev->getRSSI();
     push_sample((int8_t)rssi);
   }
@@ -139,17 +149,24 @@ void update_state_machine() {
     return;
   }
 
-  // No sample seen recently? Treat as out-of-range. The scan window means
-  // we should hear from a nearby peer at least every BLE_ADV_INTERVAL_MS;
-  // 4× that with no sample = peer is gone.
+  // No sample seen recently? Treat as out-of-range. SAMPLE_STALE_MS is
+  // generous (3 s) — BLE+WiFi coexistence on this chip makes adverts
+  // bouncy, and a single good sample needs to bridge the dwell window
+  // even if the next several are dropped.
   const uint32_t stale_ms = now_ms - s_last_sample_ms;
-  const uint32_t stale_threshold_ms = BLE_ADV_INTERVAL_MS * 4UL;
-  if (stale_ms > stale_threshold_ms) {
+  if (stale_ms > SAMPLE_STALE_MS) {
     s_smoothed_rssi = -127;
     clear_samples();
   } else {
     s_smoothed_rssi = compute_smoothed();
   }
+
+  // Did we receive a fresh sample THIS tick? Used below to differentiate
+  // "sample says peer is gone" from "we just haven't heard anything yet".
+  // BLE+WiFi coexistence makes individual samples bouncy, so we don't
+  // want to bail out of APPROACHING / IN_PROXIMITY just because no
+  // adverts came through in one window.
+  const bool fresh = (stale_ms <= SAMPLE_STALE_MS);
 
   switch (s_state) {
     case State::UNPAIRED:
@@ -158,27 +175,33 @@ void update_state_machine() {
       break;
 
     case State::OUT_OF_RANGE:
-      if (s_smoothed_rssi >= PROXIMITY_RSSI_THRESHOLD) {
+      if (fresh && s_smoothed_rssi >= PROXIMITY_RSSI_THRESHOLD) {
         transition(State::APPROACHING, now_ms);
       }
       break;
 
     case State::APPROACHING:
-      if (s_smoothed_rssi < RELEASE_RSSI_THRESHOLD) {
-        transition(State::OUT_OF_RANGE, now_ms);
-      } else if ((now_ms - s_state_started_ms) >= PROXIMITY_DWELL_SECONDS * 1000UL) {
+      // Dwell wins over release: once we've held APPROACHING for the
+      // configured window, promote to IN_PROXIMITY. Only fall back to
+      // OUT_OF_RANGE on FRESH evidence (a real sample below release
+      // threshold), not on staleness — sparse samples are normal here.
+      if ((now_ms - s_state_started_ms) >= PROXIMITY_DWELL_SECONDS * 1000UL) {
         transition(State::IN_PROXIMITY, now_ms);
+      } else if (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD) {
+        transition(State::OUT_OF_RANGE, now_ms);
       }
       break;
 
     case State::IN_PROXIMITY:
-      if (s_smoothed_rssi < RELEASE_RSSI_THRESHOLD) {
+      // Same idea: only fall back to LEAVING on a fresh sample below
+      // release. If we just lost samples, hold IN_PROXIMITY.
+      if (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD) {
         transition(State::LEAVING, now_ms);
       }
       break;
 
     case State::LEAVING:
-      if (s_smoothed_rssi >= PROXIMITY_RSSI_THRESHOLD) {
+      if (fresh && s_smoothed_rssi >= PROXIMITY_RSSI_THRESHOLD) {
         // Came back into range — straight to IN_PROXIMITY (no dwell, since
         // we already established the connection).
         transition(State::IN_PROXIMITY, now_ms);
