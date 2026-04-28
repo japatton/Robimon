@@ -418,6 +418,10 @@ void loop() {
         LOG_I(TAG, "alarm dismiss (tap)");
         robimon::services::alarm_mgr::dismiss_current();
       } else {
+        // Briefly glance at the touch — even when the tap goes to a non-
+        // face screen the eyes track, which makes Robimon feel attentive
+        // beyond the face screen alone.
+        robimon::face::glance_at(pt.x, pt.y);
         robimon::ui::screen_mgr::on_tap(pt.x, pt.y);
       }
       break;

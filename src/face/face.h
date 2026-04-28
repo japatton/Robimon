@@ -78,4 +78,11 @@ void flash_eyes(uint32_t duration_ms = 120);
 // speak. Pass 0 to clear.
 void start_listening_ring(uint32_t window_ms);
 
+// Briefly direct the face's gaze toward a panel coordinate. Used by the
+// main loop's TAP handler to make the eyes track where the kid touched —
+// per BB-8's puppeteer rule: "once that eye is looking at what it needs to
+// look at, it looks like he's in the moment." The glance fades back into
+// drift after ~700 ms.
+void glance_at(int panel_x, int panel_y);
+
 }  // namespace robimon::face

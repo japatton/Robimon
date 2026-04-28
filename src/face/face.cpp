@@ -15,11 +15,12 @@ namespace robimon::face {
 // Geometry
 // =============================================================================
 //
-// Two large pixelated eyes + a pixelated mouth + pink cheek blushes. Kawaii
-// pixel-robot vibe. Expression is conveyed through a combination of:
-//   - eye lid coverage (top/bottom, with inner/outer tilt for furrowed brows)
-//   - mouth shape (one of a few small pixel bitmaps)
-//   - cheek blushes (visible for warm moods, hidden for serious/scared)
+// Two large smooth rounded-rectangle eyes. No mouth. No cheeks. The whole
+// face vocabulary is two shapes that morph: scale, lid coverage (with slant
+// for furrowed brows), and a gaze offset that drifts gently and tracks
+// touches. Inspired by Cozmo / Vector / EVE — the design principle is
+// that two simple shapes plus motion communicate more emotion than a
+// detailed kawaii face. ("Simpler is better" — Carlos Baena, Pixar/Anki.)
 //
 // Drawing happens into the back-buffer owned by the display HAL. Coordinates
 // are canvas-local: (0,0) is the top-left of the canvas band, which sits on
@@ -33,16 +34,20 @@ constexpr int PANEL_W        = 466;
 constexpr int LEFT_EYE_CX    = 145;
 constexpr int RIGHT_EYE_CX   = PANEL_W - LEFT_EYE_CX;
 
-// Eye geometry: rounded square. Width / height in pixels (snapped to cells
-// at draw time). The corner chamfer is CORNER_CELLS cells per corner —
-// gives an octagonal/rounded-square silhouette.
-constexpr int EYE_W_BASE     = 130;     // 13 cells wide
-constexpr int EYE_H_BASE     = 130;     // 13 cells tall
-constexpr int CORNER_CELLS   = 2;       // chamfer K cells from each corner
+// Eye geometry — smooth rounded rectangles. Corner radius is ~20% of the
+// shorter edge, which is the proportion the Cozmo / EVE eye references
+// converge on. No more cell grid: a single fillRoundRect per eye.
+constexpr int EYE_W_BASE     = 130;
+constexpr int EYE_H_BASE     = 130;
+constexpr int EYE_CORNER_R   = 26;       // ~20 % of edge
+
+// Maximum gaze offset (in pixels, applied to the eye center). Drift uses
+// a small fraction of this; touch-glance uses the full amount.
+constexpr int GAZE_MAX_DX    = 18;
+constexpr int GAZE_MAX_DY    = 8;
 
 // Vertical centers within the canvas. Set in begin() from canvas height.
-int s_face_cy   = 160;   // eyes
-int s_mouth_cy  = 270;   // mouth (centered horizontally)
+int s_face_cy   = 160;
 
 // Reserve the bottom of the canvas for screen-manager overlays (carousel
 // dots). Face renderers fillRect to FACE_DRAW_BOTTOM rather than fillScreen
@@ -50,102 +55,38 @@ int s_mouth_cy  = 270;   // mouth (centered horizontally)
 // otherwise produces a visible flicker at 30 FPS.
 constexpr int FACE_DRAW_BOTTOM = 300;
 
-// Robot "mouth" — a vocoder-style speaker grille that doubles as the
-// voice-mode button. Replaces the kawaii pixel mouth. Centered at the
-// canvas position previously occupied by the mouth.
-constexpr int MOUTH_BTN_W      = 130;
-constexpr int MOUTH_BTN_H      = 36;
-constexpr int MOUTH_BAR_COUNT  = 9;
-constexpr int MOUTH_BAR_W      = 6;
-constexpr int MOUTH_BAR_H      = 22;
-constexpr int MOUTH_BAR_GAP    = 6;
-
-constexpr int MOUTH_CX       = PANEL_W / 2;
+// Y-coordinate (canvas-local) where the listen-cue ring is centered, and
+// the boundary between "tap on eye area = voice" vs. "tap below eyes =
+// expression menu". The mouth used to live around y = 270.
+constexpr int LISTEN_RING_CY   = 270;
+constexpr int VOICE_TAP_Y_MAX  = 220;     // anything ≤ this in the canvas → voice
 
 // Color palette — sci-fi blue on black. RGB565.
-//   0x055F = R=0, G=168, B=248 → strong electric blue-cyan; reads as "robot LED"
-//   rather than the near-white cyan of the previous look.
-constexpr uint16_t COLOR_BG       = 0x0000;
-constexpr uint16_t COLOR_EYE      = 0x055F;
+//   0x055F = R=0, G=168, B=248 → electric blue-cyan; reads as "robot LED".
+constexpr uint16_t COLOR_BG        = 0x0000;
+constexpr uint16_t COLOR_EYE       = 0x055F;
 constexpr uint16_t COLOR_EYE_FLASH = 0xFFFF;   // white — listen cue accent
-constexpr uint16_t COLOR_MOUTH    = 0x055F;
-
-// Pixelation: each "logical pixel" is a CELL_PX × CELL_PX block with a 1-px
-// black gap between blocks. Same cell size for eyes and mouth so the whole
-// face reads as one unified pixel grid.
-constexpr int CELL_PX   = 10;
-constexpr int CELL_FILL = CELL_PX - 1;
-
-// =============================================================================
-// Mouth bitmaps
-// =============================================================================
-//
-// Each mouth is a small grid of cells. cols × rows; row_bits[r] bit 0 is the
-// LEFTMOST cell of that row, bit (cols-1) is the rightmost. Lit cells get
-// drawn in COLOR_MOUTH; unset cells stay background.
-//
-struct MouthDef {
-  uint8_t  cols;
-  uint8_t  rows;
-  uint16_t row_bits[5];
-};
-
-// Tiny flat dash — neutral / listening.
-constexpr MouthDef MOUTH_FLAT = { 5, 1, {
-  0b11111,
-}};
-
-// Curved smile — happy / excited.
-constexpr MouthDef MOUTH_SMILE = { 7, 2, {
-  0b1000001,
-  0b0111110,
-}};
-
-// Inverted curve — sad / confused.
-constexpr MouthDef MOUTH_FROWN = { 7, 2, {
-  0b0111110,
-  0b1000001,
-}};
-
-// Small open "O" — surprised.
-constexpr MouthDef MOUTH_O = { 3, 3, {
-  0b010,
-  0b101,
-  0b010,
-}};
-
-// Slight angle — thinking (looks like "hmm").
-constexpr MouthDef MOUTH_HMM = { 5, 1, {
-  0b11110,
-}};
-
-// Wide-open chatter shape — speaking. Will get amplitude-modulated later.
-constexpr MouthDef MOUTH_SPEAK = { 5, 3, {
-  0b01110,
-  0b11111,
-  0b01110,
-}};
-
-// Slight downturn — angry.
-constexpr MouthDef MOUTH_GRIMACE = { 7, 2, {
-  0b1111111,
-  0b0000000,
-}};
-
-// Tiny squiggle — sleepy.
-constexpr MouthDef MOUTH_DASH = { 3, 1, {
-  0b111,
-}};
-
-// "No mouth" sentinel.
-constexpr MouthDef MOUTH_NONE = { 0, 0, {0} };
 
 // =============================================================================
 // Eye / face params
 // =============================================================================
+// Each eye is a rounded shape parameterized by independent X / Y scale, a
+// vertical offset (for "looking up / down" effects), corner radius (so
+// "awe" / "surprised" eyes can be more oval), and four lid depths for
+// fine-grain slant when needed. Per the Cozmo expression chart, most
+// expressions are conveyed by HEIGHT and POSITION changes, not slanted
+// lids — so most presets touch only scale_y / y_offset and leave the
+// lid params at zero. Slants stay available for sad / angry brows.
+//
+// No mouth field — every charming-but-robotic face reference (Cozmo, EVE,
+// Vector, BB-8, WALL-E, Baymax) is mouthless. Talk affordance is the full
+// eye area as a tap target; speaking emotion is conveyed via eye animation.
 struct EyeShape {
-  float scale;
-  float top_lid_outer;
+  float scale_x;          // horizontal stretch (1.0 = base width)
+  float scale_y;          // vertical stretch  (1.0 = base height)
+  float y_offset;         // vertical shift in fractions of base height (+ = down)
+  float corner_frac;      // corner radius as fraction of shorter edge (default 0.20)
+  float top_lid_outer;    // residual lid masking for slant accents
   float top_lid_inner;
   float bot_lid_outer;
   float bot_lid_inner;
@@ -153,62 +94,69 @@ struct EyeShape {
 struct FaceParams {
   EyeShape left;
   EyeShape right;
-  const MouthDef* mouth;
 };
 
-inline EyeShape sym(float scale, float top, float bot) {
-  return { scale, top, top, bot, bot };
+// Helpers — most expressions only need scale_x, scale_y, y_offset.
+inline EyeShape simple(float sx, float sy, float yoff = 0.0f, float cr = 0.20f) {
+  return { sx, sy, yoff, cr, 0, 0, 0, 0 };
 }
-inline EyeShape sym4(float scale, float to, float ti, float bo, float bi) {
-  return { scale, to, ti, bo, bi };
+inline EyeShape brow(float sx, float sy, float yoff,
+                     float to, float ti, float bo = 0.0f, float bi = 0.0f,
+                     float cr = 0.20f) {
+  return { sx, sy, yoff, cr, to, ti, bo, bi };
 }
 
 // =============================================================================
-// Expression presets
+// Expression presets — patterned on the Cozmo expression sheet
 // =============================================================================
-const FaceParams P_NEUTRAL   = { sym(1.00f, 0.00f, 0.00f),
-                                  sym(1.00f, 0.00f, 0.00f),
-                                  &MOUTH_FLAT };
+// Default = simple(1, 1, 0). Where the chart shows shorter eyes, scale_y
+// drops. Where it shows positional shifts (looking up / down), y_offset is
+// non-zero. Slant only appears in sad/angry/glee where the chart has it.
 
-const FaceParams P_HAPPY     = { sym(1.00f, 0.00f, 0.00f),
-                                  sym(1.00f, 0.00f, 0.00f),
-                                  &MOUTH_SMILE };
+const FaceParams P_NEUTRAL   = { simple(1.00f, 1.00f),
+                                  simple(1.00f, 1.00f) };
 
-const FaceParams P_SAD       = { sym4(0.95f, 0.45f, 0.10f, 0.00f, 0.00f),
-                                  sym4(0.95f, 0.10f, 0.45f, 0.00f, 0.00f),
-                                  &MOUTH_FROWN };
+// Cozmo "Happy / Glee" = short eyes (a bowed-up bottom). Shrunk vertically,
+// slight downward shift so the bowed bottom reads naturally.
+const FaceParams P_HAPPY     = { simple(1.00f, 0.55f, 0.10f),
+                                  simple(1.00f, 0.55f, 0.10f) };
 
-const FaceParams P_SLEEPY    = { sym(0.95f, 0.78f, 0.78f),
-                                  sym(0.95f, 0.78f, 0.78f),
-                                  &MOUTH_DASH };
+// Cozmo "Sad (looking down)" = moderate-height eyes with mild outward droop.
+// Slant is gentle (0.25 outer top vs 0.05 inner) to avoid sharp diagonals.
+const FaceParams P_SAD       = { brow(0.95f, 0.85f, +0.05f, 0.25f, 0.05f),
+                                  brow(0.95f, 0.85f, +0.05f, 0.05f, 0.25f) };
 
-const FaceParams P_SURPRISED = { sym(1.15f, 0.00f, 0.00f),
-                                  sym(1.15f, 0.00f, 0.00f),
-                                  &MOUTH_O };
+// Cozmo "Sleepy Eyes" = very short eyes near the bottom of the area.
+const FaceParams P_SLEEPY    = { simple(0.95f, 0.30f, +0.25f),
+                                  simple(0.95f, 0.30f, +0.25f) };
 
-const FaceParams P_ANGRY     = { sym4(0.95f, 0.10f, 0.55f, 0.00f, 0.00f),
-                                  sym4(0.95f, 0.55f, 0.10f, 0.00f, 0.00f),
-                                  &MOUTH_GRIMACE };
+// Cozmo "Awe / Surprised" = larger, more circular eyes.
+const FaceParams P_SURPRISED = { simple(1.10f, 1.15f, 0.0f, 0.40f),
+                                  simple(1.10f, 1.15f, 0.0f, 0.40f) };
 
-const FaceParams P_THINKING  = { sym(1.00f, 0.05f, 0.05f),
-                                  sym4(0.95f, 0.55f, 0.20f, 0.10f, 0.00f),
-                                  &MOUTH_HMM };
+// Cozmo "Angry" = moderate height with a "v" inward brow.
+const FaceParams P_ANGRY     = { brow(0.95f, 0.75f, 0.0f, 0.05f, 0.35f),
+                                  brow(0.95f, 0.75f, 0.0f, 0.35f, 0.05f) };
 
-const FaceParams P_EXCITED   = { sym(1.05f, 0.00f, 0.00f),
-                                  sym(1.05f, 0.00f, 0.00f),
-                                  &MOUTH_SMILE };
+// Cozmo "Squint / Focused" = short and slightly sloped — a determined look.
+const FaceParams P_THINKING  = { brow(1.00f, 0.55f, 0.0f, 0.10f, 0.20f),
+                                  simple(0.95f, 0.55f, 0.0f) };
 
-const FaceParams P_CONFUSED  = { sym(1.05f, 0.00f, 0.00f),
-                                  sym4(0.80f, 0.30f, 0.10f, 0.05f, 0.00f),
-                                  &MOUTH_HMM };
+// Like Happy but eye is bigger overall — "yay!"
+const FaceParams P_EXCITED   = { simple(1.05f, 0.65f, 0.10f),
+                                  simple(1.05f, 0.65f, 0.10f) };
 
-const FaceParams P_LISTENING = { sym(1.05f, 0.00f, 0.00f),
-                                  sym(1.05f, 0.00f, 0.00f),
-                                  &MOUTH_FLAT };
+// Cozmo "Skeptic / Worried" = asymmetric eye size (one raised brow).
+const FaceParams P_CONFUSED  = { simple(1.05f, 1.00f),
+                                  simple(0.80f, 0.65f, +0.10f) };
 
-const FaceParams P_SPEAKING  = { sym(1.00f, 0.10f, 0.10f),
-                                  sym(1.00f, 0.10f, 0.10f),
-                                  &MOUTH_SPEAK };
+// Listening = larger, attentive — full eye open, slightly bigger.
+const FaceParams P_LISTENING = { simple(1.10f, 1.10f),
+                                  simple(1.10f, 1.10f) };
+
+// Speaking = relaxed slight squint.
+const FaceParams P_SPEAKING  = { simple(1.00f, 0.90f),
+                                  simple(1.00f, 0.90f) };
 
 const FaceParams& preset(Expression e) {
   switch (e) {
@@ -323,7 +271,10 @@ inline float ease_out_cubic(float t) { return 1.0f - powf(1.0f - t, 3.0f); }
 inline float clamp01(float x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
 
 void interp_eye(EyeShape& out, const EyeShape& a, const EyeShape& b, float t) {
-  out.scale         = lerp(a.scale,         b.scale,         t);
+  out.scale_x       = lerp(a.scale_x,       b.scale_x,       t);
+  out.scale_y       = lerp(a.scale_y,       b.scale_y,       t);
+  out.y_offset      = lerp(a.y_offset,      b.y_offset,      t);
+  out.corner_frac   = lerp(a.corner_frac,   b.corner_frac,   t);
   out.top_lid_outer = lerp(a.top_lid_outer, b.top_lid_outer, t);
   out.top_lid_inner = lerp(a.top_lid_inner, b.top_lid_inner, t);
   out.bot_lid_outer = lerp(a.bot_lid_outer, b.bot_lid_outer, t);
@@ -332,93 +283,78 @@ void interp_eye(EyeShape& out, const EyeShape& a, const EyeShape& b, float t) {
 void interp(FaceParams& out, const FaceParams& a, const FaceParams& b, float t) {
   interp_eye(out.left,  a.left,  b.left,  t);
   interp_eye(out.right, a.right, b.right, t);
-  // Mouth switches discretely at the midpoint (no smooth bitmap tween).
-  out.mouth = (t < 0.5f) ? a.mouth : b.mouth;
 }
 
 // =============================================================================
 // Drawing
 // =============================================================================
 //
-// Eye is a rounded-square (octagonal) shape: a rectangle with the K corner
-// cells chamfered off via a Manhattan-distance corner cut. Lids cover the
-// top/bottom with linear inner-vs-outer interpolation, same as before.
+// Eye is rendered as a stack of 1-px-wide vertical strips. Per strip we
+// compute the local lid depth (linearly interpolated outer→inner across
+// the eye width) and a quarter-circle "corner offset" that rounds the
+// four corners. Slanted lids (sad / angry brows) emerge from the top/bot
+// depth interpolation; the corner rounding is layered on top so the lid
+// edges curve smoothly into the corners instead of meeting them at hard
+// diagonal lines.
 //
-void draw_pixelated_eye(int cx, int cy, int w, int h, bool is_left,
-                         float top_outer, float top_inner,
-                         float bot_outer, float bot_inner) {
-  if (w < CELL_PX || h < CELL_PX) return;
-
+// Cost: ~2 × eye_width = ~260 short fillRect calls per frame. Each is
+// roughly a memset of ~50 bytes into the PSRAM canvas. Negligible at
+// 30 FPS.
+//
+void draw_smooth_eye(int cx, int cy, int w, int h, bool is_left,
+                     float corner_frac,
+                     float top_outer, float top_inner,
+                     float bot_outer, float bot_inner) {
+  if (w < 8 || h < 8) return;
   Arduino_GFX* g = robimon::hal::display::gfx();
-  const int half_w = w / 2;
-  const int half_h = h / 2;
-  const int x0 = cx - half_w;
-  const int x1 = cx + half_w;
-  const int y0 = cy - half_h;
-  const int y1 = cy + half_h;
-  const int corner_px = CORNER_CELLS * CELL_PX;
 
-  // Snap grid origin to multiples of CELL_PX.
-  const int gx0 = x0 - (x0 % CELL_PX + CELL_PX) % CELL_PX;
-  const int gy0 = y0 - (y0 % CELL_PX + CELL_PX) % CELL_PX;
+  const int x0 = cx - w / 2;
+  const int y0 = cy - h / 2;
+  const int y1 = y0 + h;
+  // Corner radius from per-expression fraction of the shorter edge — so
+  // "surprised" / "awe" can crank corners up to 0.40+ for a more circular
+  // shape, while "neutral" stays at the chart's ~20 % proportion.
+  const int short_edge = w < h ? w : h;
+  int radius = (int)(short_edge * corner_frac);
+  if (radius > w / 2) radius = w / 2;
+  if (radius > h / 2) radius = h / 2;
+  if (radius < 1)     radius = 1;
 
-  for (int gy = gy0; gy < y1; gy += CELL_PX) {
-    const int cell_cy = gy + CELL_PX / 2;
-    if (cell_cy < y0 || cell_cy >= y1) continue;
-    const int dy_top = cell_cy - y0;
-    const int dy_bot = y1 - cell_cy;
-    const int dy_edge = (dy_top < dy_bot) ? dy_top : dy_bot;
+  const uint16_t fill = (millis() < s_eye_flash_until_ms)
+                          ? COLOR_EYE_FLASH : COLOR_EYE;
 
-    for (int gx = gx0; gx < x1; gx += CELL_PX) {
-      const int cell_cx = gx + CELL_PX / 2;
-      if (cell_cx < x0 || cell_cx >= x1) continue;
-      const int dx_left  = cell_cx - x0;
-      const int dx_right = x1 - cell_cx;
-      const int dx_edge  = (dx_left < dx_right) ? dx_left : dx_right;
+  // For the LEFT eye, "outer" is the left side (x=x0) and "inner" is the
+  // right side (x=x1-1). For RIGHT eye, mirrored.
+  const float top_left_frac  = is_left ? top_outer : top_inner;
+  const float top_right_frac = is_left ? top_inner : top_outer;
+  const float bot_left_frac  = is_left ? bot_outer : bot_inner;
+  const float bot_right_frac = is_left ? bot_inner : bot_outer;
 
-      // Manhattan corner chamfer: skip cells where the sum of distances to
-      // the two nearest edges is less than the chamfer threshold.
-      if (dx_edge < corner_px && dy_edge < corner_px &&
-          (dx_edge + dy_edge) < corner_px) continue;
+  for (int dx = 0; dx < w; ++dx) {
+    const int x = x0 + dx;
+    const float t = (float)dx / (float)(w - 1);
+    const float top_lid = top_left_frac + (top_right_frac - top_left_frac) * t;
+    const float bot_lid = bot_left_frac + (bot_right_frac - bot_left_frac) * t;
 
-      // Lid coverage at this x.
-      float x_norm = (float)(cell_cx - x0) / (float)w;
-      if (!is_left) x_norm = 1.0f - x_norm;
-      const float top_depth = (top_outer + (top_inner - top_outer) * x_norm) * h;
-      const float bot_depth = (bot_outer + (bot_inner - bot_outer) * x_norm) * h;
-      if (dy_top < top_depth)         continue;
-      if (dy_top > h - bot_depth)     continue;
-
-      const uint16_t color = (millis() < s_eye_flash_until_ms)
-                              ? COLOR_EYE_FLASH : COLOR_EYE;
-      g->fillRect(gx, gy, CELL_FILL, CELL_FILL, color);
+    // Quarter-circle corner offset — pushes the top edge down (and the
+    // bottom edge up) at the left/right edges of the eye so the corners
+    // round smoothly. dx_from_corner is 0 at the very edge and `radius`
+    // at the boundary of the corner zone; offset is full at edge, zero
+    // at boundary.
+    const int edge_dist = (dx < w - 1 - dx) ? dx : (w - 1 - dx);
+    int corner = 0;
+    if (edge_dist < radius) {
+      const int rd = radius - edge_dist;
+      const int rsq = radius * radius - rd * rd;
+      // sqrt of small int — use float once.
+      corner = radius - (int)sqrtf((float)rsq);
     }
-  }
-}
 
-// Draw a pixel bitmap centered at (center_x, center_y).
-void draw_bitmap_centered(int center_x, int center_y,
-                           int cols, int rows,
-                           const uint16_t* row_bits,
-                           uint16_t color) {
-  if (cols == 0 || rows == 0) return;
-  Arduino_GFX* g = robimon::hal::display::gfx();
-  const int origin_x = center_x - (cols * CELL_PX) / 2;
-  const int origin_y = center_y - (rows * CELL_PX) / 2;
-  for (int row = 0; row < rows; ++row) {
-    for (int col = 0; col < cols; ++col) {
-      if ((row_bits[row] >> col) & 1) {
-        g->fillRect(origin_x + col * CELL_PX,
-                    origin_y + row * CELL_PX,
-                    CELL_FILL, CELL_FILL, color);
-      }
-    }
+    int y_top = y0 + (int)(top_lid * h) + corner;
+    int y_bot = y1 - (int)(bot_lid * h) - corner;
+    if (y_bot <= y_top) continue;
+    g->fillRect(x, y_top, 1, y_bot - y_top, fill);
   }
-}
-
-void draw_mouth(const MouthDef* m) {
-  if (!m || m->cols == 0) return;
-  draw_bitmap_centered(MOUTH_CX, s_mouth_cy, m->cols, m->rows, m->row_bits, COLOR_MOUTH);
 }
 
 // Compute the panel-space center of a menu item by index.
@@ -467,26 +403,48 @@ void draw_menu() {
   }
 }
 
-// Robot mouth: cyan rounded frame with 9 vertical bars inside (vocoder /
-// speaker grille). Centered on the canvas at s_mouth_cy. The whole frame
-// is the hit target for voice mode — see on_tap().
-void draw_robot_mouth(Arduino_GFX* g) {
-  const int x = (g->width() - MOUTH_BTN_W) / 2;
-  const int y = s_mouth_cy - MOUTH_BTN_H / 2;
+// (Robot mouth removed — every charming-but-robotic face reference in the
+// design research is mouthless. Eyes carry all expression. Voice tap
+// affordance is now the eye area itself; see on_tap().)
 
-  // Outer frame (2 px stroke)
-  g->drawRoundRect(x,     y,     MOUTH_BTN_W,     MOUTH_BTN_H,     8, COLOR_EYE);
-  g->drawRoundRect(x + 1, y + 1, MOUTH_BTN_W - 2, MOUTH_BTN_H - 2, 7, COLOR_EYE);
+// Gaze state — drift target + smoothed current value applied to the eye
+// centers in render_face. Defined here so render_face below sees them at
+// anonymous-namespace scope. Updated by apply_gaze (idle drift) and
+// glance_at (touch tracking).
+int      s_gaze_offset_x = 0;
+int      s_gaze_offset_y = 0;
+float    s_gaze_target_x   = 0.0f;
+float    s_gaze_target_y   = 0.0f;
+float    s_gaze_current_x  = 0.0f;
+float    s_gaze_current_y  = 0.0f;
+uint32_t s_next_drift_ms   = 0;
+uint32_t s_glance_until_ms = 0;
 
-  // Vertical bars centered inside the frame
-  const int bars_total_w = MOUTH_BAR_COUNT * MOUTH_BAR_W
-                         + (MOUTH_BAR_COUNT - 1) * MOUTH_BAR_GAP;
-  const int bars_x = x + (MOUTH_BTN_W - bars_total_w) / 2;
-  const int bars_y = y + (MOUTH_BTN_H - MOUTH_BAR_H) / 2;
-  for (int i = 0; i < MOUTH_BAR_COUNT; ++i) {
-    g->fillRect(bars_x + i * (MOUTH_BAR_W + MOUTH_BAR_GAP),
-                bars_y, MOUTH_BAR_W, MOUTH_BAR_H, COLOR_EYE);
+constexpr float GAZE_DRIFT_FRAC   = 0.30f;
+constexpr float GAZE_GLANCE_FRAC  = 1.00f;
+constexpr float GAZE_LERP         = 0.12f;
+constexpr uint32_t GLANCE_MS      = 700;
+
+void schedule_next_drift(uint32_t now) {
+  s_next_drift_ms = now + 2000 + (uint32_t)random(0, 3001);
+  const float ax = GAZE_MAX_DX * GAZE_DRIFT_FRAC;
+  const float ay = GAZE_MAX_DY * GAZE_DRIFT_FRAC;
+  s_gaze_target_x = ((float)random(-1000, 1001) / 1000.0f) * ax;
+  s_gaze_target_y = ((float)random(-1000, 1001) / 1000.0f) * ay;
+}
+
+void apply_gaze(uint32_t now) {
+  if (s_glance_until_ms != 0 && now >= s_glance_until_ms) {
+    s_glance_until_ms = 0;
+    schedule_next_drift(now);
   }
+  if (s_glance_until_ms == 0 && now >= s_next_drift_ms) {
+    schedule_next_drift(now);
+  }
+  s_gaze_current_x += (s_gaze_target_x - s_gaze_current_x) * GAZE_LERP;
+  s_gaze_current_y += (s_gaze_target_y - s_gaze_current_y) * GAZE_LERP;
+  s_gaze_offset_x = (int)s_gaze_current_x;
+  s_gaze_offset_y = (int)s_gaze_current_y;
 }
 
 void render_face(const FaceParams& p) {
@@ -496,48 +454,56 @@ void render_face(const FaceParams& p) {
   // would clobber the caption between renders.
   g->fillRect(0, 46, g->width(), FACE_DRAW_BOTTOM - 46, COLOR_BG);
 
-  const int wl = (int)(EYE_W_BASE * p.left.scale);
-  const int hl = (int)(EYE_H_BASE * p.left.scale);
-  const int wr = (int)(EYE_W_BASE * p.right.scale);
-  const int hr = (int)(EYE_H_BASE * p.right.scale);
+  const int wl = (int)(EYE_W_BASE * p.left.scale_x);
+  const int hl = (int)(EYE_H_BASE * p.left.scale_y);
+  const int wr = (int)(EYE_W_BASE * p.right.scale_x);
+  const int hr = (int)(EYE_H_BASE * p.right.scale_y);
 
-  draw_pixelated_eye(LEFT_EYE_CX,  s_face_cy, wl, hl, /*is_left=*/true,
-                     p.left.top_lid_outer,  p.left.top_lid_inner,
-                     p.left.bot_lid_outer,  p.left.bot_lid_inner);
-  draw_pixelated_eye(RIGHT_EYE_CX, s_face_cy, wr, hr, /*is_left=*/false,
-                     p.right.top_lid_outer, p.right.top_lid_inner,
-                     p.right.bot_lid_outer, p.right.bot_lid_inner);
+  // y_offset is in fractions of the BASE eye height — so a 0.10 offset
+  // moves the eye down by 13 px regardless of how much the eye has been
+  // shrunk vertically. This keeps "looking down" looking the same amount
+  // whether eyes are small or large.
+  const int gx = s_gaze_offset_x;
+  const int gy = s_gaze_offset_y;
+  const int yo_left  = (int)(p.left.y_offset  * EYE_H_BASE);
+  const int yo_right = (int)(p.right.y_offset * EYE_H_BASE);
 
-  // Robot mouth + voice button. When an alarm label is showing, the label
-  // takes the mouth area's space so the two don't fight.
+  draw_smooth_eye(LEFT_EYE_CX  + gx, s_face_cy + gy + yo_left,  wl, hl,
+                  /*is_left=*/true,  p.left.corner_frac,
+                  p.left.top_lid_outer,  p.left.top_lid_inner,
+                  p.left.bot_lid_outer,  p.left.bot_lid_inner);
+  draw_smooth_eye(RIGHT_EYE_CX + gx, s_face_cy + gy + yo_right, wr, hr,
+                  /*is_left=*/false, p.right.corner_frac,
+                  p.right.top_lid_outer, p.right.top_lid_inner,
+                  p.right.bot_lid_outer, p.right.bot_lid_inner);
+
+  // Alarm label takes precedence over voice cues — alarm is highest-priority
+  // anyway and shows the alarm name where the mouth used to be.
   if (s_label[0]) {
     g->setTextSize(3);
     g->setTextColor(COLOR_EYE);
     const int lw = (int)strlen(s_label) * 18;
-    g->setCursor(g->width() / 2 - lw / 2, s_mouth_cy - 12);
+    g->setCursor(g->width() / 2 - lw / 2, LISTEN_RING_CY - 12);
     g->print(s_label);
-  } else {
-    draw_robot_mouth(g);
+    return;
+  }
 
-    // Listening countdown — a depleting arc above the mouth so the kid
-    // can see how long they have left to talk. A top-half semicircle
-    // (rather than a full ring) keeps the arc inside the canvas band
-    // and clear of the bottom dot indicator. Sweeps from 9-o'clock to
-    // 3-o'clock; depletes by shortening from the right side first.
-    if (s_listen_ring_window_ms) {
-      const uint32_t now = millis();
-      const uint32_t elapsed = (now > s_listen_ring_start_ms)
-                                ? now - s_listen_ring_start_ms : 0;
-      if (elapsed >= s_listen_ring_window_ms) {
-        s_listen_ring_window_ms = 0;
-      } else {
-        const float frac = 1.0f - (float)elapsed / (float)s_listen_ring_window_ms;
-        const float sweep = frac * 180.0f;
-        const int   r1 = MOUTH_BTN_W / 2 + 6;
-        const int   r2 = r1 - 4;
-        g->fillArc(g->width() / 2, s_mouth_cy, r1, r2,
-                   -180.0f, -180.0f + sweep, COLOR_EYE);
-      }
+  // Listening countdown — depleting top-half arc centered below the eyes
+  // (where the mouth used to be). The face has no mouth now, so this is the
+  // only voice-flow visual that lives in the lower half of the canvas.
+  if (s_listen_ring_window_ms) {
+    const uint32_t now = millis();
+    const uint32_t elapsed = (now > s_listen_ring_start_ms)
+                              ? now - s_listen_ring_start_ms : 0;
+    if (elapsed >= s_listen_ring_window_ms) {
+      s_listen_ring_window_ms = 0;
+    } else {
+      const float frac = 1.0f - (float)elapsed / (float)s_listen_ring_window_ms;
+      const float sweep = frac * 180.0f;
+      const int   r1 = 80;
+      const int   r2 = r1 - 4;
+      g->fillArc(g->width() / 2, LISTEN_RING_CY, r1, r2,
+                 -180.0f, -180.0f + sweep, COLOR_EYE);
     }
   }
 }
@@ -567,10 +533,25 @@ void render(const FaceParams& p) {
 }
 
 // =============================================================================
-// Idle behaviors
+// Idle behaviors — blink, breath, gaze drift, gaze tracking
 // =============================================================================
+//
+// Per the design research (Cozmo / Vector references), idle micro-motion is
+// the single load-bearing element of "the bot is alive." The trio:
+//   - Blink: jittered every ~3-7 s, ~310 ms total with a held-closed plateau
+//   - Breath: subtle ±2 % scale sine over 4 s
+//   - Gaze drift: small offset that wanders to a new random target every
+//                 2-5 s, smoothed so the eyes appear to track imaginary
+//                 things rather than teleport.
+//
+// Gaze tracking on touch: when on_tap fires, glance_at(panel_x, panel_y) sets
+// the drift target to point at where the kid touched, with full amplitude.
+// After ~700 ms the glance fades and ordinary drift resumes.
+
 void schedule_next_blink() {
-  s_next_blink_ms = millis() + 2000 + (uint32_t)random(0, 4001);
+  // 3-7 s jitter (tighter floor than the previous 2-6 s, slower-blinking
+  // bots feel calmer and less twitchy).
+  s_next_blink_ms = millis() + 3000 + (uint32_t)random(0, 4001);
 }
 
 void apply_blink(FaceParams& p, uint32_t now) {
@@ -578,11 +559,14 @@ void apply_blink(FaceParams& p, uint32_t now) {
     if (now >= s_next_blink_ms) s_blink_start_ms = now;
     return;
   }
+  // 310 ms total: 90 ms close, 100 ms held, 120 ms open. The held-closed
+  // plateau is what makes a blink feel like a blink rather than a flicker
+  // — Cozmo, Vector, and EVE all hold for ~80-120 ms.
   const uint32_t bt = now - s_blink_start_ms;
   float blink_amt = 0;
   if      (bt < 90)  blink_amt = (float)bt / 90.0f;
-  else if (bt < 150) blink_amt = 1.0f;
-  else if (bt < 260) blink_amt = 1.0f - (float)(bt - 150) / 110.0f;
+  else if (bt < 190) blink_amt = 1.0f;
+  else if (bt < 310) blink_amt = 1.0f - (float)(bt - 190) / 120.0f;
   else { s_blink_start_ms = 0; schedule_next_blink(); return; }
 
   p.left.top_lid_outer  = clamp01(p.left.top_lid_outer  + blink_amt);
@@ -593,8 +577,8 @@ void apply_blink(FaceParams& p, uint32_t now) {
 
 void apply_breath(FaceParams& p, uint32_t now) {
   const float k = 1.0f + sinf((float)now * (2.0f * 3.14159265f / 4000.0f)) * 0.020f;
-  p.left.scale  *= k;
-  p.right.scale *= k;
+  p.left.scale_x  *= k;  p.left.scale_y  *= k;
+  p.right.scale_x *= k;  p.right.scale_y *= k;
 }
 
 }  // namespace
@@ -608,10 +592,10 @@ bool begin() {
     LOG_E(TAG, "display not initialized");
     return false;
   }
-  // Layout the face elements vertically within the canvas.
+  // Eyes a bit above center vertically; the lower half of the canvas is
+  // empty space (no mouth) used by the listening ring + alarm label.
   const int H = g->height();
-  s_face_cy   = H * 5 / 12;          // eyes a bit above center
-  s_mouth_cy  = H * 10 / 12;         // mouth near the bottom
+  s_face_cy = H * 5 / 12;
 
   s_current = P_NEUTRAL;
   s_from    = P_NEUTRAL;
@@ -620,11 +604,11 @@ bool begin() {
 
   randomSeed((uint32_t)esp_timer_get_time());
   schedule_next_blink();
+  schedule_next_drift(millis());
 
   render(s_current);
   s_last_frame_ms = millis();
-  LOG_I(TAG, "face up — eyes y=%d, mouth y=%d (canvas %dx%d)",
-        s_face_cy, s_mouth_cy, g->width(), H);
+  LOG_I(TAG, "face up — eyes y=%d (canvas %dx%d)", s_face_cy, g->width(), H);
   return true;
 }
 
@@ -643,6 +627,14 @@ void update() {
   if ((now - s_last_frame_ms) < 33) return;
   s_last_frame_ms = now;
 
+  // Track mode transitions out of MENU / FLASH so we can wipe the canvas
+  // once. The menu's items orbit the canvas at radius 125 (y range ~10–285),
+  // which extends above and below the per-frame face fillRect (y 46..300).
+  // Without an explicit clear on dismiss, the menu's outer edges leak
+  // through into subsequent face frames.
+  static FaceMode s_prev_mode = FaceMode::IDLE;
+  const FaceMode entering = s_mode;
+
   // Auto-dismiss the menu after the timeout.
   if (s_mode == FaceMode::MENU && (now - s_menu_open_ms) > MENU_TIMEOUT_MS) {
     s_mode = FaceMode::IDLE;
@@ -652,6 +644,12 @@ void update() {
   if (s_mode == FaceMode::FLASH && (now - s_flash_start_ms) > FLASH_MS) {
     s_mode = FaceMode::IDLE;
   }
+
+  if (s_prev_mode != FaceMode::IDLE && s_mode == FaceMode::IDLE) {
+    Arduino_GFX* g = robimon::hal::display::gfx();
+    if (g) g->fillRect(0, 0, g->width(), FACE_DRAW_BOTTOM, COLOR_BG);
+  }
+  s_prev_mode = entering;
 
   FaceParams base;
   if (s_tween_dur_ms == 0) base = s_to;
@@ -663,6 +661,7 @@ void update() {
 
   apply_breath(base, now);
   apply_blink(base, now);
+  apply_gaze(now);
   s_current = base;
   render(s_current);
 
@@ -682,18 +681,15 @@ void on_tap(int panel_x, int panel_y) {
   const int canvas_y = panel_y - robimon::hal::display::canvas_panel_y_offset();
 
   if (s_mode == FaceMode::IDLE) {
-    // Robot mouth hit-test takes priority over menu-open. Don't trigger
-    // when an alarm label is showing (mouth isn't drawn then).
-    if (!s_label[0]) {
-      const int btn_x = (PANEL_W - MOUTH_BTN_W) / 2;
-      const int btn_y = s_mouth_cy - MOUTH_BTN_H / 2;
-      if (panel_x >= btn_x && panel_x < btn_x + MOUTH_BTN_W &&
-          canvas_y >= btn_y && canvas_y < btn_y + MOUTH_BTN_H) {
-        LOG_I(TAG, "mouth tapped -> voice");
-        ::robimon::services::voice::start();
-        ::robimon::services::tutorial::on_mouth_tap();
-        return;
-      }
+    // Eye-area = voice ("look me in the eye, I'm listening"). Below-eyes =
+    // expression menu. The split lives at VOICE_TAP_Y_MAX which sits where
+    // the mouth used to be (canvas y ≈ 220). Suppressed when an alarm
+    // label is showing — the alarm has priority.
+    if (!s_label[0] && canvas_y >= 0 && canvas_y < VOICE_TAP_Y_MAX) {
+      LOG_I(TAG, "face tapped (eye area) -> voice");
+      ::robimon::services::voice::start();
+      ::robimon::services::tutorial::on_mouth_tap();
+      return;
     }
 
     s_mode = FaceMode::MENU;
@@ -751,6 +747,24 @@ void flash_eyes(uint32_t duration_ms) {
 void start_listening_ring(uint32_t window_ms) {
   s_listen_ring_start_ms  = millis();
   s_listen_ring_window_ms = window_ms;
+}
+
+void glance_at(int panel_x, int panel_y) {
+  // Convert panel coords to a normalized eye-offset target. The eye center
+  // is at LEFT_EYE_CX/RIGHT_EYE_CX horizontally and s_face_cy (canvas-local)
+  // vertically. Use the canvas geometric center as the reference so glances
+  // look natural for taps anywhere on the screen.
+  const int canvas_y = panel_y - robimon::hal::display::canvas_panel_y_offset();
+  const float dx = (float)(panel_x - PANEL_W / 2);
+  const float dy = (float)(canvas_y - s_face_cy);
+  // Map ~1/3 of the canvas extent to full gaze deflection.
+  constexpr float SCALE_X = (float)PANEL_W / 6.0f;   // ≈ 78 px → full
+  constexpr float SCALE_Y = 80.0f;                    // canvas height / 4
+  float fx = dx / SCALE_X; if (fx > 1) fx = 1; if (fx < -1) fx = -1;
+  float fy = dy / SCALE_Y; if (fy > 1) fy = 1; if (fy < -1) fy = -1;
+  s_gaze_target_x   = fx * GAZE_MAX_DX * GAZE_GLANCE_FRAC;
+  s_gaze_target_y   = fy * GAZE_MAX_DY * GAZE_GLANCE_FRAC;
+  s_glance_until_ms = millis() + GLANCE_MS;
 }
 
 void enable_demo_cycle(bool on) {
