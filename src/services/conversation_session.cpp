@@ -53,6 +53,15 @@ bool note_play_received(const char* session_id, uint8_t turn_index) {
     return false;
   }
 
+  // Reject duplicate / out-of-order turn — defense in depth alongside
+  // the server's (session_id, turn_index) dedup. Without this, a delayed
+  // duplicate of an earlier turn would replay its audio.
+  if (turn_index <= s_turn_index) {
+    LOG_W(TAG, "session %s rejecting non-monotonic turn %u (have %u)",
+          s_session_id, (unsigned)turn_index, (unsigned)s_turn_index);
+    return false;
+  }
+
   s_turn_index = turn_index;
   s_last_activity_ms = millis();
   return true;

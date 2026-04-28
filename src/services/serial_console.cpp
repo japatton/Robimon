@@ -53,6 +53,7 @@ void cmd_help() {
   Serial.println("  pair-peer <MAC>               save peer's BLE address for proximity (e.g. AA:BB:CC:DD:EE:FF)");
   Serial.println("  unpair-peer                   forget paired peer");
   Serial.println("  proximity                     show proximity state + smoothed RSSI");
+  Serial.println("  task-stats                    list FreeRTOS tasks + stack high-water marks");
 }
 
 void cmd_list() {
@@ -177,6 +178,29 @@ void cmd_proximity() {
                 (int)proximity::smoothed_rssi());
 }
 
+void cmd_task_stats() {
+  // FreeRTOS gives us per-task stack high-water marks (smallest free
+  // stack space the task has ever seen). Useful for sizing tasks
+  // empirically rather than by guess. CONFIG_FREERTOS_USE_TRACE_FACILITY
+  // must be enabled (it is by default on Arduino-ESP32 3.x).
+  const UBaseType_t n = uxTaskGetNumberOfTasks();
+  TaskStatus_t* arr = (TaskStatus_t*)malloc(n * sizeof(TaskStatus_t));
+  if (!arr) { Serial.println("alloc failed"); return; }
+  uint32_t total_runtime = 0;
+  const UBaseType_t got = uxTaskGetSystemState(arr, n, &total_runtime);
+  Serial.println("name              core  prio  stack-min(B)");
+  for (UBaseType_t i = 0; i < got; ++i) {
+    Serial.printf("  %-16s %4d   %3u   %u\n",
+                  arr[i].pcTaskName,
+                  (int)arr[i].xCoreID,
+                  (unsigned)arr[i].uxCurrentPriority,
+                  (unsigned)arr[i].usStackHighWaterMark * 4);   // words → bytes
+  }
+  Serial.printf("free heap: %u  free PSRAM: %u\n",
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+  free(arr);
+}
+
 void cmd_factory_reset() {
   // Clears every key the device cares about and arms setup mode. Doesn't
   // touch alarms_blob — those are unlikely to be the cause of a lockout,
@@ -218,6 +242,7 @@ void execute_line(char* line) {
   else if (strcmp(cmd, "pair-peer") == 0)     cmd_pair_peer((char*)rest);
   else if (strcmp(cmd, "unpair-peer") == 0)   cmd_unpair_peer();
   else if (strcmp(cmd, "proximity") == 0)     cmd_proximity();
+  else if (strcmp(cmd, "task-stats") == 0)    cmd_task_stats();
   else if (strcmp(cmd, "reboot") == 0)        { Serial.println("rebooting…"); delay(200); ESP.restart(); }
   else { Serial.printf("unknown: %s (try 'help')\n", cmd); }
 }

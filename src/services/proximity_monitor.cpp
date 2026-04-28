@@ -64,23 +64,28 @@ void clear_samples() {
 }
 
 // ---- NimBLE scan callback -------------------------------------------------
+// We pin our own address type to BLE_OWN_ADDR_PUBLIC at init (see begin()),
+// and store the peer with the same type, so NimBLEAddress::operator== works
+// here without the bytes-only workaround that the early bring-up needed.
+// Keep the bytes-only fallback as belt-and-suspenders behind a quick type
+// check — the comparison cost is identical.
 class ScanCB : public NimBLEScanCallbacks {
  public:
   void onResult(const NimBLEAdvertisedDevice* dev) override {
     if (!s_has_peer) return;
-    // Compare by raw 6 bytes only — NimBLEAddress::operator== also checks
-    // the address TYPE (public vs. random vs. resolvable), and one bot
-    // advertising as resolvable while we stored as public would silently
-    // fail to match. Bytes-only is what the requirement intends.
-    const uint8_t* native = dev->getAddress().getBase()->val;   // little-endian
-    bool match = true;
-    for (int i = 0; i < 6; ++i) {
-      // s_peer_mac is big-endian (display order); native is reversed.
-      if (native[i] != s_peer_mac[5 - i]) { match = false; break; }
+    const NimBLEAddress& addr = dev->getAddress();
+    if (addr == s_peer_addr) {
+      push_sample((int8_t)dev->getRSSI());
+      return;
     }
-    if (!match) return;
-    const int rssi = dev->getRSSI();
-    push_sample((int8_t)rssi);
+    // Type may have flipped under us (some NimBLE builds randomize on
+    // session start). Compare raw bytes as a fallback so we don't miss
+    // adverts because of a stack-internal type mismatch.
+    const uint8_t* native = addr.getBase()->val;   // little-endian
+    for (int i = 0; i < 6; ++i) {
+      if (native[i] != s_peer_mac[5 - i]) return;
+    }
+    push_sample((int8_t)dev->getRSSI());
   }
 };
 ScanCB s_scan_cb;
@@ -168,6 +173,12 @@ void update_state_machine() {
   // adverts came through in one window.
   const bool fresh = (stale_ms <= SAMPLE_STALE_MS);
 
+  // Absolute-staleness watchdog: if it's been ABSOLUTE_STALE_MS with NO
+  // samples whatsoever, the peer has actually gone away (powered off,
+  // walked out of range during a Wi-Fi-noise gap). Without this the
+  // "fresh sample required to demote" rule latches IN_PROXIMITY forever.
+  const bool absolute_stale = (stale_ms > ABSOLUTE_STALE_MS);
+
   switch (s_state) {
     case State::UNPAIRED:
       // Just paired? Wait for samples.
@@ -185,7 +196,10 @@ void update_state_machine() {
       // configured window, promote to IN_PROXIMITY. Only fall back to
       // OUT_OF_RANGE on FRESH evidence (a real sample below release
       // threshold), not on staleness — sparse samples are normal here.
-      if ((now_ms - s_state_started_ms) >= PROXIMITY_DWELL_SECONDS * 1000UL) {
+      // Absolute-stale forces a fall-back even without a fresh sample.
+      if (absolute_stale) {
+        transition(State::OUT_OF_RANGE, now_ms);
+      } else if ((now_ms - s_state_started_ms) >= PROXIMITY_DWELL_SECONDS * 1000UL) {
         transition(State::IN_PROXIMITY, now_ms);
       } else if (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD) {
         transition(State::OUT_OF_RANGE, now_ms);
@@ -194,8 +208,10 @@ void update_state_machine() {
 
     case State::IN_PROXIMITY:
       // Same idea: only fall back to LEAVING on a fresh sample below
-      // release. If we just lost samples, hold IN_PROXIMITY.
-      if (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD) {
+      // release. If we just lost samples, hold IN_PROXIMITY — UNLESS
+      // we've been completely silent for ABSOLUTE_STALE_MS, in which
+      // case the peer has really gone.
+      if (absolute_stale || (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD)) {
         transition(State::LEAVING, now_ms);
       }
       break;
@@ -265,18 +281,28 @@ const char* state_str(State s) {
 bool begin(StateChangedFn cb) {
   s_cb = cb;
 
-  // BLE init. Device name uses the same scheme as the existing voice
-  // bot_id (last 4 hex of MAC) so two bots in a household are
-  // distinguishable in a scanner app.
-  const uint64_t mac = ESP.getEfuseMac();
-  char name[24];
-  snprintf(name, sizeof(name), "Robimon-%04X", (uint16_t)(mac & 0xFFFF));
-  NimBLEDevice::init(name);
+  // BLE init. Device name suffix is the LOW 16 bits of the BLE address
+  // (computed after init below) so the scanner-shown name and the
+  // bot_id used by the companion server line up exactly.
+  NimBLEDevice::init("Robimon");
+  // Pin to public address type — the chip's BLE address derives from the
+  // efuse MAC and is stable across reboots. Without this, NimBLE may
+  // pick a random/RPA address per session and our peer-comparison fails
+  // silently. The bytes-only fallback in the scan callback is belt-and-
+  // suspenders for the rare case it still flips.
+  NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
 
-  // Cache our own address as a string for the pairing flow.
+  // Cache our own address (derived from the BT MAC, which is base+2 from
+  // the efuse) and update the advertised device name with the matching
+  // 4-hex suffix so scanner apps and the companion server's bot_id agree.
   const NimBLEAddress own = NimBLEDevice::getAddress();
   strncpy(s_own_addr_str, own.toString().c_str(), sizeof(s_own_addr_str) - 1);
   s_own_addr_str[sizeof(s_own_addr_str) - 1] = '\0';
+  const uint8_t* own_native = own.getBase()->val;   // little-endian
+  // Display-order low 2 bytes = native[1], native[0]
+  char name[24];
+  snprintf(name, sizeof(name), "Robimon-%02X%02X", own_native[1], own_native[0]);
+  NimBLEDevice::setDeviceName(name);
   LOG_I(TAG, "BLE up: name='%s' addr=%s", name, s_own_addr_str);
 
   if (load_peer_from_nvs()) {

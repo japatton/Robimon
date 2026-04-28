@@ -2,6 +2,7 @@
 #include "proximity_config.h"
 #include "conversation_session.h"
 #include "companion_client.h"
+#include "proximity_monitor.h"
 #include "../hal/audio.h"
 #include "../app/log.h"
 
@@ -123,64 +124,63 @@ size_t resample_to_16k(const int16_t* src, size_t src_count, uint32_t src_rate,
 // sent from the request callback after the body callback completes.
 // ---------------------------------------------------------------------------
 
-// Per-request state — captured by the body handler, consumed by the
-// request handler. Stored in a struct attached to the request via
-// _tempObject so it lives across the chunked-body callbacks.
+// Per-request state. Single static instance — only one /play can be in
+// flight at a time (gated by s_buf_avail), so allocating per request was
+// pure heap-fragmentation tax. The body handler initializes this on the
+// first chunk; the request handler consumes it.
 struct ReqState {
-  bool   accepted = false;
-  bool   error    = false;
-  String error_msg;
-  size_t total_bytes = 0;
-  String session;
-  uint8_t turn = 0;
+  bool    accepted    = false;
+  bool    error       = false;
+  uint8_t error_code  = 400;       // 400 / 503 / 409
+  const char* error_msg = "";      // points at static literal
+  size_t  total_bytes = 0;
+  char    session[40] = {0};
+  uint8_t turn        = 0;
 };
+static ReqState s_req;
 
 void on_play_body(AsyncWebServerRequest* req, uint8_t* data, size_t len,
                   size_t index, size_t total) {
-  ReqState* st = (ReqState*)req->_tempObject;
-  if (!st) {
-    st = new ReqState();
-    req->_tempObject = st;
-  }
-
   if (index == 0) {
-    // First chunk — pull headers, take the buffer, validate.
-    st->total_bytes = total;
+    // First chunk — reset the slot, pull headers, take the buffer.
+    s_req = ReqState{};
+    s_req.total_bytes = total;
     if (req->hasHeader("X-Session-Id")) {
-      st->session = req->header("X-Session-Id");
+      const String& s = req->header("X-Session-Id");
+      strncpy(s_req.session, s.c_str(), sizeof(s_req.session) - 1);
     }
     if (req->hasHeader("X-Turn-Index")) {
-      st->turn = (uint8_t)req->header("X-Turn-Index").toInt();
+      s_req.turn = (uint8_t)req->header("X-Turn-Index").toInt();
     }
     LOG_I(TAG, "/play hdr session='%s' turn=%u total=%u",
-          st->session.c_str(), (unsigned)st->turn, (unsigned)total);
+          s_req.session, (unsigned)s_req.turn, (unsigned)total);
 
-    if (st->session.length() == 0) {
-      st->error = true; st->error_msg = "missing X-Session-Id";
+    if (s_req.session[0] == '\0') {
+      s_req.error = true; s_req.error_code = 400;
+      s_req.error_msg = "missing X-Session-Id";
       return;
     }
     if (total == 0 || total > MAX_INBOUND_BYTES) {
-      st->error = true; st->error_msg = "bad content length";
+      s_req.error = true; s_req.error_code = 400;
+      s_req.error_msg = "bad content length";
       return;
     }
-    // Buffer ownership — non-blocking. Returned by play worker after
-    // playback.
     if (xSemaphoreTake(s_buf_avail, 0) != pdTRUE) {
-      st->error = true; st->error_msg = "playback in progress";
+      s_req.error = true; s_req.error_code = 503;
+      s_req.error_msg = "playback in progress";
       return;
     }
-    st->accepted = true;
+    s_req.accepted = true;
     s_in_size = 0;
   }
 
-  if (st->error || !st->accepted) {
-    return;   // skip remaining chunks; the request handler will send the error
-  }
+  if (s_req.error || !s_req.accepted) return;
 
   if (index + len > MAX_INBOUND_BYTES) {
-    st->error = true; st->error_msg = "body overflow";
+    s_req.error = true; s_req.error_code = 400;
+    s_req.error_msg = "body overflow";
     xSemaphoreGive(s_buf_avail);
-    st->accepted = false;
+    s_req.accepted = false;
     return;
   }
   memcpy(s_in_buf + index, data, len);
@@ -188,53 +188,44 @@ void on_play_body(AsyncWebServerRequest* req, uint8_t* data, size_t len,
 }
 
 void on_play_request(AsyncWebServerRequest* req) {
-  ReqState* st = (ReqState*)req->_tempObject;
-  // No body handler ran (zero-length POST?) — synthesize an error state.
-  if (!st) {
+  if (s_req.error) {
+    req->send(s_req.error_code, "text/plain", s_req.error_msg);
+    return;
+  }
+  if (!s_req.accepted) {
     req->send(400, "text/plain", "missing body");
     return;
   }
-  if (st->error) {
-    req->send(st->error_msg == "playback in progress" ? 503 : 400,
-              "text/plain", st->error_msg);
-    delete st; req->_tempObject = nullptr;
-    return;
-  }
-  if (s_in_size != st->total_bytes) {
+  if (s_in_size != s_req.total_bytes) {
     req->send(400, "text/plain", "incomplete body");
-    if (st->accepted) xSemaphoreGive(s_buf_avail);
-    delete st; req->_tempObject = nullptr;
+    xSemaphoreGive(s_buf_avail);
+    s_req.accepted = false;
     return;
   }
 
-  // Session policy gating + audio arbitration happen here, after the
-  // body has fully arrived. If either gate rejects, we release the
-  // buffer and respond.
-  if (!conversation_session::note_play_received(st->session.c_str(), st->turn)) {
+  if (!conversation_session::note_play_received(s_req.session, s_req.turn)) {
     req->send(409, "text/plain", "session policy rejected");
     xSemaphoreGive(s_buf_avail);
-    delete st; req->_tempObject = nullptr;
+    s_req.accepted = false;
     return;
   }
   if (!::robimon::hal::audio::try_acquire(::robimon::hal::audio::Owner::PROXIMITY)) {
     LOG_W(TAG, "audio owned by higher priority — dropping play");
-    companion_client::send_playback_error(st->session.c_str(), "audio_busy");
+    companion_client::send_playback_error(s_req.session, "audio_busy");
     req->send(503, "text/plain", "audio busy");
     xSemaphoreGive(s_buf_avail);
-    delete st; req->_tempObject = nullptr;
+    s_req.accepted = false;
     return;
   }
 
   // Stage metadata for the worker, signal it.
-  strncpy(s_pending_session, st->session.c_str(), sizeof(s_pending_session) - 1);
+  strncpy(s_pending_session, s_req.session, sizeof(s_pending_session) - 1);
   s_pending_session[sizeof(s_pending_session) - 1] = '\0';
-  s_pending_turn = st->turn;
+  s_pending_turn = s_req.turn;
   s_playing      = true;
 
   xSemaphoreGive(s_play_sem);
   req->send(202, "text/plain", "accepted");
-
-  delete st; req->_tempObject = nullptr;
 }
 
 void on_stop_request(AsyncWebServerRequest* req) {
@@ -244,12 +235,42 @@ void on_stop_request(AsyncWebServerRequest* req) {
 }
 
 void on_status_request(AsyncWebServerRequest* req) {
-  char buf[160];
+  // Extended diagnostic dump — what the field would want when the
+  // conversation didn't start. JSON kept compact; values are best-effort.
+  using ::robimon::services::proximity::state_str;
+  using ::robimon::services::proximity::state;
+  using ::robimon::services::proximity::smoothed_rssi;
+  using ::robimon::hal::audio::current_owner;
+  using ::robimon::hal::audio::Owner;
+
+  const Owner owner = current_owner();
+  const char* owner_str =
+      owner == Owner::ALARM     ? "alarm" :
+      owner == Owner::VOICE     ? "voice" :
+      owner == Owner::PROXIMITY ? "proximity" : "none";
+
+  char buf[384];
   snprintf(buf, sizeof(buf),
-           "{\"bot_id\":\"%s\",\"playing\":%s,\"current_session\":\"%s\"}",
+           "{\"bot_id\":\"%s\","
+           "\"playing\":%s,"
+           "\"current_session\":\"%s\","
+           "\"current_turn\":%u,"
+           "\"prox_state\":\"%s\","
+           "\"smoothed_rssi\":%d,"
+           "\"audio_owner\":\"%s\","
+           "\"free_heap\":%u,"
+           "\"free_psram\":%u,"
+           "\"uptime_s\":%lu}",
            companion_client::bot_id(),
            s_playing ? "true" : "false",
-           conversation_session::current_session_id());
+           conversation_session::current_session_id(),
+           (unsigned)conversation_session::current_turn_index(),
+           state_str(state()),
+           (int)smoothed_rssi(),
+           owner_str,
+           (unsigned)ESP.getFreeHeap(),
+           (unsigned)ESP.getFreePsram(),
+           (unsigned long)(millis() / 1000));
   req->send(200, "application/json", buf);
 }
 
@@ -350,8 +371,13 @@ bool begin() {
   s_web->begin();
   LOG_I(TAG, "listening on :%u", (unsigned)proximity_config::PLAYBACK_SERVER_PORT);
 
+  // Play task on core 1 — alongside the main loop, OFF core 0 where
+  // NimBLE host + AsyncTCP + the BT controller all already live. With
+  // play_task on core 0, audio playback was starving the BLE scan
+  // callback during turns; moving it lets BLE keep receiving samples
+  // while audio is decoded/resampled/written.
   xTaskCreatePinnedToCore(play_task, "play_audio", 6144, nullptr,
-                           /*priority=*/1, &s_play_task, /*core=*/0);
+                           /*priority=*/2, &s_play_task, /*core=*/1);
   return true;
 }
 

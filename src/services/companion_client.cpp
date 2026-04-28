@@ -58,25 +58,33 @@ bool post_json(const char* path, const char* body, size_t body_len) {
   char url[224];
   snprintf(url, sizeof(url), "%s%s", s_base_url, path);
 
-  for (uint8_t attempt = 0; attempt <= proximity_config::OUTBOUND_HTTP_RETRIES; ++attempt) {
-    HTTPClient http;
-    http.setTimeout(proximity_config::OUTBOUND_HTTP_TIMEOUT_MS);
-    if (!http.begin(url)) {
-      LOG_W(TAG, "begin failed: %s", url);
-      return false;
-    }
-    http.addHeader("Content-Type", "application/json");
-    const int code = http.POST((uint8_t*)body, body_len);
-    http.end();
-    if (code >= 200 && code < 300) {
-      return true;
-    }
-    LOG_W(TAG, "POST %s -> %d (attempt %u)", path, code, (unsigned)(attempt + 1));
-    esp_task_wdt_reset();
-    if (attempt < proximity_config::OUTBOUND_HTTP_RETRIES) {
-      vTaskDelay(pdMS_TO_TICKS(150));
-    }
+  // Single attempt, no retry on failure. POSTs aren't idempotent on the
+  // wire — the server already has (session_id, turn_index) dedup as
+  // defense in depth, but the client retrying on what looked like a
+  // failed POST (timeout while server actually completed) was the
+  // duplicate-playback_complete root cause.
+  HTTPClient http;
+  // setReuse(true) keeps the underlying TCP connection alive across
+  // POSTs from this same HTTPClient instance — saves the ~50 ms TCP
+  // handshake on subsequent calls. The instance is local to this call,
+  // so the win is bounded; for true cross-call reuse we'd need to
+  // promote http to file scope.
+  http.setReuse(true);
+  http.setTimeout(proximity_config::OUTBOUND_HTTP_TIMEOUT_MS);
+  if (!http.begin(url)) {
+    LOG_W(TAG, "begin failed: %s", url);
+    return false;
   }
+  http.addHeader("Content-Type", "application/json");
+  const uint32_t t0 = millis();
+  const int code = http.POST((uint8_t*)body, body_len);
+  const uint32_t dt = millis() - t0;
+  http.end();
+  if (code >= 200 && code < 300) {
+    if (dt > 1000) LOG_I(TAG, "POST %s -> %d (%lu ms)", path, code, (unsigned long)dt);
+    return true;
+  }
+  LOG_W(TAG, "POST %s -> %d (%lu ms)", path, code, (unsigned long)dt);
   return false;
 }
 
@@ -145,10 +153,17 @@ bool enqueue(const Request& r) {
 }  // namespace
 
 void begin() {
-  // Bot ID: last 4 hex of efuse MAC. Matches the BLE device-name suffix
-  // and the existing voice client's identification scheme.
-  const uint64_t mac = ESP.getEfuseMac();
-  snprintf(s_bot_id, sizeof(s_bot_id), "%04X", (uint16_t)(mac & 0xFFFF));
+  // Bot ID: last 4 hex chars of the BLE display address (Robimon-XXXX
+  // form). The BLE address is the BT MAC = efuse base MAC + 2 in the
+  // low byte, so we derive it without depending on BLE being up yet.
+  // Without this alignment the companion server logs "bot_id=8898" but
+  // the BLE scanner shows "Robimon-B355" — same device, different
+  // identifiers — which has already cost debugging time.
+  uint64_t base = ESP.getEfuseMac();
+  uint8_t* b = (uint8_t*)&base;     // memory order = display order, byte 0..5
+  const uint8_t ble_lsb_minus1 = b[4];
+  const uint8_t ble_lsb        = (uint8_t)(b[5] + 2);   // BT MAC = base + 2 in LSB
+  snprintf(s_bot_id, sizeof(s_bot_id), "%02X%02X", ble_lsb_minus1, ble_lsb);
 
   load_base_url();
   LOG_I(TAG, "bot_id=%s base_url=%s", s_bot_id, s_base_url);

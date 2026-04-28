@@ -72,6 +72,13 @@ constexpr uint16_t BLE_ADV_INTERVAL_MS         = 200;
 // before the LEAVING release dwell starts counting.
 constexpr uint32_t SAMPLE_STALE_MS = 3000;
 
+// Absolute watchdog — even with the "fresh sample required to demote"
+// policy, force-demote APPROACHING/IN_PROXIMITY back toward OUT_OF_RANGE
+// after this long with no samples at all. Without this, a peer that
+// vanishes silently (powered off, walked away in a Wi-Fi-noise gap)
+// latches us into IN_PROXIMITY forever.
+constexpr uint32_t ABSOLUTE_STALE_MS = 12000;
+
 // ---- Conversation session safety ------------------------------------------
 // If no new /play arrives within this many seconds after we ack a
 // playback_complete, treat the session as abandoned (companion crashed,
@@ -85,8 +92,15 @@ constexpr uint32_t SESSION_IDLE_TIMEOUT_SECONDS = 30;
 constexpr uint8_t  SESSION_MAX_TURNS = 20;
 
 // ---- Outbound HTTP --------------------------------------------------------
-constexpr uint32_t OUTBOUND_HTTP_TIMEOUT_MS = 2000;
-constexpr uint8_t  OUTBOUND_HTTP_RETRIES    = 1;
+// Timeout bumped from 2 s to 8 s to outlast the slowest expected server-
+// side handler work. Even though the server now returns 200 immediately
+// from playback_complete + dispatches in a worker thread, leaving margin
+// here costs nothing. RETRIES=0 because POSTs aren't idempotent on the
+// wire (server has its own (session_id, turn_index) dedup as defense in
+// depth) — retrying on a request the server actually completed was the
+// duplicate-playback_complete root cause.
+constexpr uint32_t OUTBOUND_HTTP_TIMEOUT_MS = 8000;
+constexpr uint8_t  OUTBOUND_HTTP_RETRIES    = 0;
 
 // NVS key for the paired peer's BLE address (12 hex chars, no separators).
 constexpr const char* NVS_KEY_PEER_MAC = "peer_mac";

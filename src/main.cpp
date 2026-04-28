@@ -247,19 +247,26 @@ void setup() {
   robimon::services::proximity::begin(
       [](robimon::services::proximity::State new_state, int8_t rssi) {
         using S = robimon::services::proximity::State;
+        // Track whether we've told the server "detected" so we can match
+        // it with a "lost". Without this, the server's registry shows the
+        // bot as in-proximity for the full PROXIMITY_HOLD_SECONDS window
+        // even after the bot already left.
+        static bool s_detected_sent = false;
         switch (new_state) {
           case S::IN_PROXIMITY:
             robimon::face::set_expression(robimon::face::Expression::EXCITED, 250);
             robimon::ui::screen_mgr::set_caption("found a friend!", 4000);
             robimon::services::companion_client::send_proximity_detected(rssi);
+            s_detected_sent = true;
             // Wake the screen if it was dimmed/blanked.
             s_last_activity_ms = millis();
             break;
           case S::OUT_OF_RANGE:
-            // Only fire proximity_lost if a session was actually in flight
-            // (otherwise we're just leaving idle scan state).
-            if (robimon::services::conversation_session::is_active()) {
+            if (s_detected_sent) {
               robimon::services::companion_client::send_proximity_lost();
+              s_detected_sent = false;
+            }
+            if (robimon::services::conversation_session::is_active()) {
               robimon::services::conversation_session::end_session("proximity_lost");
             }
             break;
