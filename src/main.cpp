@@ -50,6 +50,9 @@
 #include "services/voice_client.h"
 #include "services/tutorial.h"
 #include "services/proximity_monitor.h"
+#include "services/companion_client.h"
+#include "services/playback_server.h"
+#include "services/conversation_session.h"
 #include "screens/setup_screen.h"
 #include "app/log.h"
 #include "app/stats.h"
@@ -228,12 +231,45 @@ void setup() {
   // gesture.
   robimon::services::tutorial::begin();
 
-  // Proximity monitor (Phase A: stub callback that just logs). NimBLE
-  // scan + advertise live on a core-0 task; UNPAIRED if no peer MAC is
-  // stored — set with `pair-peer <MAC>` from the serial console.
+  // Proximity feature stack (bot-to-bot conversation):
+  //   conversation_session  — local session bookkeeping + safety timeouts
+  //   companion_client      — outbound HTTP worker (proximity + playback events)
+  //   playback_server       — inbound HTTP for /play, /stop, /status
+  //   proximity_monitor     — BLE RSSI state machine
+  // The proximity callback runs on the proximity task (core 0); each branch
+  // queues to the companion HTTP worker (also core 0) — no blocking on the
+  // main UI loop.
+  robimon::services::conversation_session::begin();
+  robimon::services::companion_client::begin();
+  if (!robimon::services::playback_server::begin()) {
+    LOG_W(TAG, "playback server failed to start (PSRAM low?)");
+  }
   robimon::services::proximity::begin(
       [](robimon::services::proximity::State new_state, int8_t rssi) {
-        LOG_I(TAG, "proximity stub: %s @ %d dBm",
+        using S = robimon::services::proximity::State;
+        switch (new_state) {
+          case S::IN_PROXIMITY:
+            robimon::face::set_expression(robimon::face::Expression::EXCITED, 250);
+            robimon::ui::screen_mgr::set_caption("found a friend!", 4000);
+            robimon::services::companion_client::send_proximity_detected(rssi);
+            // Wake the screen if it was dimmed/blanked.
+            s_last_activity_ms = millis();
+            break;
+          case S::OUT_OF_RANGE:
+            // Only fire proximity_lost if a session was actually in flight
+            // (otherwise we're just leaving idle scan state).
+            if (robimon::services::conversation_session::is_active()) {
+              robimon::services::companion_client::send_proximity_lost();
+              robimon::services::conversation_session::end_session("proximity_lost");
+            }
+            break;
+          case S::APPROACHING:
+          case S::LEAVING:
+          case S::UNPAIRED:
+            // No companion-app event for transitional or idle states.
+            break;
+        }
+        LOG_I(TAG, "prox cb: %s @ %d dBm",
               robimon::services::proximity::state_str(new_state), (int)rssi);
       });
 
@@ -427,6 +463,7 @@ void loop() {
   robimon::services::voice::update(millis());
   robimon::services::serial_console::update(millis());
   robimon::services::tutorial::update(millis());
+  robimon::services::conversation_session::update(millis());
 
   // Watch for alarm firing transitions so the face overlay + alarm sound
   // match the alarm_mgr state. Doing this in main keeps alarm_mgr free of

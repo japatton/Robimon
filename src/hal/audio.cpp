@@ -39,6 +39,9 @@ TaskHandle_t        s_alarm_task = nullptr;
 std::atomic<bool>   s_alarm_stop{false};
 std::atomic<bool>   s_alarm_running{false};
 
+// ---- Audio ownership arbitration ------------------------------------------
+std::atomic<uint8_t> s_audio_owner{(uint8_t)Owner::NONE};
+
 esp_err_t init_codec(uint32_t sample_rate) {
   // ES8311 lives on Wire (I2C port 0). The es8311 driver uses the low-level
   // i2cWrite/Read helpers under the hood, so it inherits whatever Wire was
@@ -260,6 +263,11 @@ void alarm_task(void*) {
 
   esp_task_wdt_add(NULL);
 
+  // Alarm is highest priority — try_acquire(ALARM) succeeds even if voice
+  // or proximity currently holds the path. Voice/proximity tasks should
+  // notice via current_owner() that they were preempted and bail.
+  try_acquire(Owner::ALARM);
+
   enable_amp(true);
   vTaskDelay(pdMS_TO_TICKS(8));   // let the amp settle so the first sample doesn't pop
 
@@ -278,6 +286,7 @@ void alarm_task(void*) {
   }
 
   enable_amp(false);
+  release(Owner::ALARM);
   esp_task_wdt_delete(NULL);
   s_alarm_running = false;
   s_alarm_task = nullptr;
@@ -378,5 +387,33 @@ void play_test_tone() {
 }
 
 bool ok() { return s_ok; }
+
+// ---- Ownership arbitration ------------------------------------------------
+bool try_acquire(Owner owner) {
+  uint8_t want = (uint8_t)owner;
+  if (want == 0) return false;
+  for (;;) {
+    uint8_t cur = s_audio_owner.load(std::memory_order_acquire);
+    // Take if NONE, or if we strictly out-rank the current owner.
+    if (cur != 0 && want <= cur) return false;
+    if (s_audio_owner.compare_exchange_weak(cur, want,
+                                            std::memory_order_acq_rel)) {
+      return true;
+    }
+  }
+}
+
+void release(Owner owner) {
+  uint8_t want = (uint8_t)owner;
+  uint8_t cur  = want;
+  // Only clear if we still own it. compare_exchange handles the race
+  // where a higher-priority owner has taken over since we last checked.
+  s_audio_owner.compare_exchange_strong(cur, (uint8_t)Owner::NONE,
+                                         std::memory_order_acq_rel);
+}
+
+Owner current_owner() {
+  return (Owner)s_audio_owner.load(std::memory_order_acquire);
+}
 
 }  // namespace robimon::hal::audio

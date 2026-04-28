@@ -359,12 +359,22 @@ void voice_task(void*) {
       }
     }
 
+    // Take the audio path before playing. If the alarm is active it will
+    // out-rank us and try_acquire returns false — drop the response and
+    // let the kid see the CONFUSED face / hear the oops cue.
+    if (!::robimon::hal::audio::try_acquire(::robimon::hal::audio::Owner::VOICE)) {
+      LOG_W(TAG, "audio busy with higher priority owner — dropping voice playback");
+      task_exit(State::ERROR_OTHER);
+      return;
+    }
+
     set_state(State::PLAYING);
     ::robimon::hal::audio::enable_amp(true);
     delay(10);
     ::robimon::hal::audio::play(s_resampled_buf, resampled_count);
     delay(40);
     ::robimon::hal::audio::enable_amp(false);
+    ::robimon::hal::audio::release(::robimon::hal::audio::Owner::VOICE);
     esp_task_wdt_reset();
   }
 

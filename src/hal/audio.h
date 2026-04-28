@@ -35,6 +35,34 @@ void enable_amp(bool on);
 size_t play(const int16_t* samples, size_t count);
 size_t capture(int16_t* samples, size_t max_count);
 
+// ---- Audio ownership arbitration -----------------------------------------
+// One thing plays at a time. Callers acquire the audio path at a priority
+// before driving play()/capture(); the call fails if a higher-priority
+// owner holds it. This is cooperative — there's no preemption. An ALARM
+// that fires while voice is mid-playback waits for voice's chunk to
+// complete; voice that starts while proximity is mid-playback similarly.
+// Accept that limitation and the audio path stays simple. Document the
+// trade-off in PROXIMITY_FEATURE.md.
+enum class Owner : uint8_t {
+  NONE      = 0,
+  PROXIMITY = 1,
+  VOICE     = 2,
+  ALARM     = 3,    // highest — kid-safety wake-up
+};
+
+// Atomic test-and-set. Returns true and takes ownership if either:
+//   - the path is currently NONE, or
+//   - the requested owner is strictly higher priority than the current.
+// Returns false if a same-or-higher priority owner already holds it.
+bool  try_acquire(Owner owner);
+
+// Releases ownership iff the caller currently holds it. No-op otherwise.
+void  release(Owner owner);
+
+// Current owner — callers can poll this to detect they were preempted by
+// a higher priority owner taking over.
+Owner current_owner();
+
 // Plays a short sine-ish chirp on the speaker. Useful as a one-shot bring-up
 // confirmation. Blocks for ~120 ms.
 void play_test_tone();
