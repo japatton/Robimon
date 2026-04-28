@@ -274,6 +274,11 @@ PROXIMITY_HOLD_SECONDS = 30   # how long a single proximity_detected counts
 SESSION_COOLDOWN_S     = 30   # don't immediately re-trigger after a session
 LAST_SESSION_END_TS    = 0.0
 
+# Server-side session watchdog: if no event arrives for an active session
+# within this window, end it. Defense against a bot crashing mid-session
+# leaving ACTIVE_SESSION set forever.
+SESSION_EVENT_TIMEOUT_S = 60
+
 # A small library of kid-friendly two-speaker scripts. Each script is a list
 # of strings; the speaker alternates per line starting with the bot the
 # orchestrator picks as "starter". Lines are kept short — Piper synthesis
@@ -404,7 +409,9 @@ def _stop_bot(bot_id: str):
 
 
 def _dispatch_current_turn(session: dict) -> bool:
-    """Generate audio for the current turn and POST it to the speaking bot."""
+    """Generate audio for the current turn and POST it to the speaking bot.
+    Synchronous (TTS + HTTP). Always called from a worker thread so the
+    request handler that triggered the dispatch can return 200 immediately."""
     turn = session["current_turn"]
     if turn >= len(session["script"]):
         return False
@@ -420,11 +427,23 @@ def _dispatch_current_turn(session: dict) -> bool:
     return _post_audio_to_bot(speaker_bot, wav, session["session_id"], turn)
 
 
+def _dispatch_async(session: dict):
+    """Spawn a daemon thread to do TTS + dispatch + on-failure cleanup.
+    Decouples the bot's request from server work so the bot's HTTP timeout
+    isn't tied to TTS latency (which was the root cause of the duplicate
+    playback_complete cascade per the review)."""
+    def _run():
+        if not _dispatch_current_turn(session):
+            _end_session("dispatch failed")
+    t = threading.Thread(target=_run, name="dispatch", daemon=True)
+    t.start()
+
+
 def _maybe_start_session():
     """Called whenever proximity state changes. Kicks off a session if two
     bots are in proximity, no session is already active, and we're past
     the cooldown."""
-    global ACTIVE_SESSION, LAST_SESSION_END_TS
+    global ACTIVE_SESSION
 
     with SESSION_LOCK:
         if ACTIVE_SESSION is not None:
@@ -442,21 +461,20 @@ def _maybe_start_session():
         random.shuffle(pair)
         script = random.choice(BOT_DIALOGS)
         session = {
-            "session_id":   f"sess-{uuid.uuid4().hex[:12]}",
-            "script":       script,
-            "current_turn": 0,
-            "bots":         pair,           # bots[0] starts, bots[1] replies
+            "session_id":     f"sess-{uuid.uuid4().hex[:12]}",
+            "script":         script,
+            "current_turn":   0,
+            "bots":           pair,           # bots[0] starts, bots[1] replies
+            "last_event_ts":  _now(),         # watchdog timestamp
+            "seen_completes": set(),          # idempotency: (turn_index,) seen
         }
         ACTIVE_SESSION = session
         log.info("starting session %s with bots %s (script: %d turns)",
                  session["session_id"], pair, len(script))
 
-    # Dispatch the opening turn outside the lock so we don't hold it
-    # across HTTP/TTS.
-    if not _dispatch_current_turn(session):
-        with SESSION_LOCK:
-            ACTIVE_SESSION = None
-            LAST_SESSION_END_TS = _now()
+    # Dispatch the opening turn off-thread so this caller (the proximity
+    # endpoint handler) returns to the bot promptly.
+    _dispatch_async(session)
 
 
 def _end_session(reason: str):
@@ -507,6 +525,9 @@ def api_proximity_lost():
 
 @app.route("/api/playback/complete", methods=["POST"])
 def api_playback_complete():
+    """Idempotent: if we've already seen (session_id, turn_index), return 200
+    and do nothing. The bot's no-retry policy makes this defense in depth,
+    but the server stays correct even if a buggy client retries."""
     data = request.get_json(silent=True) or {}
     bot_id     = data.get("bot_id")
     session_id = data.get("session_id")
@@ -514,22 +535,29 @@ def api_playback_complete():
     log.info("playback_complete: bot=%s session=%s turn=%d",
              bot_id, session_id, turn_index)
 
+    advance = False
+    end_reason: str | None = None
     next_session = None
     with SESSION_LOCK:
-        if ACTIVE_SESSION and ACTIVE_SESSION["session_id"] == session_id:
-            ACTIVE_SESSION["current_turn"] = turn_index + 1
-            if ACTIVE_SESSION["current_turn"] >= len(ACTIVE_SESSION["script"]):
-                # Last turn done.
-                pass
-            else:
-                next_session = ACTIVE_SESSION
+        s = ACTIVE_SESSION
+        if not s or s["session_id"] != session_id:
+            return ("stale or unknown session", 200)
+        if turn_index in s["seen_completes"]:
+            log.info("dedup: ignoring duplicate complete for turn %d", turn_index)
+            return ("dup", 200)
+        s["seen_completes"].add(turn_index)
+        s["last_event_ts"] = _now()
+        s["current_turn"] = turn_index + 1
+        if s["current_turn"] >= len(s["script"]):
+            end_reason = "script complete"
+        else:
+            next_session = s
+            advance = True
 
-    if next_session is None:
-        # No more turns — end gracefully.
-        _end_session("script complete")
-    else:
-        if not _dispatch_current_turn(next_session):
-            _end_session("dispatch failed")
+    if advance:
+        _dispatch_async(next_session)
+    elif end_reason:
+        _end_session(end_reason)
     return ("ok", 200)
 
 
@@ -542,9 +570,31 @@ def api_playback_error():
     log.warning("playback_error: bot=%s session=%s err=%s", bot_id, sid, err)
     with SESSION_LOCK:
         active = ACTIVE_SESSION
+        if active:
+            active["last_event_ts"] = _now()
     if active and active["session_id"] == sid:
         _end_session(f"playback_error from {bot_id}")
     return ("ok", 200)
+
+
+def _session_watchdog():
+    """Background thread: ends sessions that haven't seen any event in
+    SESSION_EVENT_TIMEOUT_S. Catches the bot-crashed-mid-session hole that
+    would otherwise leave ACTIVE_SESSION pinned forever and block all
+    subsequent sessions."""
+    while True:
+        time.sleep(5)
+        try:
+            with SESSION_LOCK:
+                s = ACTIVE_SESSION
+                stale = (s is not None
+                         and (_now() - s["last_event_ts"]) > SESSION_EVENT_TIMEOUT_S)
+            if stale:
+                log.warning("session watchdog: %.1fs since last event — ending",
+                            _now() - s["last_event_ts"])
+                _end_session("watchdog")
+        except Exception as e:
+            log.error("watchdog tick failed: %s", e)
 
 
 @app.route("/api/proximity/status", methods=["GET"])
@@ -577,4 +627,5 @@ if __name__ == "__main__":
     log.info("Robimon companion on port %d", PORT)
     log.info("Ollama: %s | model: %s", OLLAMA_URL, DEFAULT_MODEL)
     log.info("Proximity feature: %d dialog scripts loaded", len(BOT_DIALOGS))
+    threading.Thread(target=_session_watchdog, name="watchdog", daemon=True).start()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
