@@ -43,10 +43,8 @@ bool begin() {
 
   // Back-buffer covering just the face band, not the full panel. The flush
   // is the bottleneck (≈ 1 byte / 10 ns over QSPI) so a smaller canvas =
-  // higher achievable FPS. 466×280 ≈ 261 KB; flush ≈ 26 ms; theoretical max
+  // higher achievable FPS. 466×320 ≈ 261 KB; flush ≈ 26 ms; theoretical max
   // ~38 FPS. Full-screen would be 434 KB / 43 ms / 23 FPS.
-  // Top of canvas at panel y=93, so face center (panel y=233) lands at
-  // canvas-local y = 140. Bottom at panel y=373.
   s_canvas = new Arduino_Canvas(LCD_WIDTH, /*h=*/CANVAS_H, s_panel,
                                 /*output_x=*/0, /*output_y=*/CANVAS_OUTPUT_Y);
 

@@ -8,6 +8,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_task_wdt.h>
+#include <atomic>
 #include <string.h>
 #include <ctype.h>
 
@@ -35,6 +36,14 @@ portMUX_TYPE s_ring_mux = portMUX_INITIALIZER_UNLOCKED;
 int8_t       s_ring[proximity_config::RSSI_SAMPLE_WINDOW] = {0};
 uint8_t      s_ring_count = 0;
 uint8_t      s_ring_pos   = 0;
+
+// ---- Diagnostic counters (NimBLE host task writes, our task reads + zeros) -
+// Atomics rather than under the ring mux: keeps the scan-callback critical
+// section as short as possible (BLE host task will block ad processing while
+// we hold the lock).
+std::atomic<uint32_t> s_adverts_seen{0};   // every onResult fires this
+std::atomic<uint32_t> s_peer_matches{0};   // matched peer MAC
+std::atomic<uint32_t> s_pushed_samples{0}; // matched + passed sentinel filter
 
 void push_sample(int8_t rssi) {
   portENTER_CRITICAL(&s_ring_mux);
@@ -69,23 +78,40 @@ void clear_samples() {
 // here without the bytes-only workaround that the early bring-up needed.
 // Keep the bytes-only fallback as belt-and-suspenders behind a quick type
 // check — the comparison cost is identical.
+// BLE-spec value for "RSSI not available" — host stacks (NimBLE included)
+// surface this from HCI events that lack the rssi field. Casting it to
+// int8_t leaves it as 127, which trivially passes any "rssi >= threshold"
+// check and was the source of phantom proximity events at boot.
+constexpr int RSSI_SENTINEL_NOT_AVAILABLE = 127;
+
 class ScanCB : public NimBLEScanCallbacks {
  public:
   void onResult(const NimBLEAdvertisedDevice* dev) override {
+    s_adverts_seen.fetch_add(1, std::memory_order_relaxed);
     if (!s_has_peer) return;
     const NimBLEAddress& addr = dev->getAddress();
-    if (addr == s_peer_addr) {
-      push_sample((int8_t)dev->getRSSI());
-      return;
+    bool match = (addr == s_peer_addr);
+    if (!match) {
+      // Type may have flipped under us (some NimBLE builds randomize on
+      // session start). Compare raw bytes as a fallback so we don't miss
+      // adverts because of a stack-internal type mismatch.
+      const uint8_t* native = addr.getBase()->val;   // little-endian
+      match = true;
+      for (int i = 0; i < 6; ++i) {
+        if (native[i] != s_peer_mac[5 - i]) { match = false; break; }
+      }
     }
-    // Type may have flipped under us (some NimBLE builds randomize on
-    // session start). Compare raw bytes as a fallback so we don't miss
-    // adverts because of a stack-internal type mismatch.
-    const uint8_t* native = addr.getBase()->val;   // little-endian
-    for (int i = 0; i < 6; ++i) {
-      if (native[i] != s_peer_mac[5 - i]) return;
-    }
-    push_sample((int8_t)dev->getRSSI());
+    if (!match) return;
+    s_peer_matches.fetch_add(1, std::memory_order_relaxed);
+
+    const int rssi = dev->getRSSI();
+    // BLE RSSI is signed dBm and in practice always negative for real
+    // signals. Drop the 127 "not available" sentinel and any other
+    // non-negative value — these are stack-internal placeholders, not
+    // real measurements.
+    if (rssi >= 0 || rssi == RSSI_SENTINEL_NOT_AVAILABLE) return;
+    push_sample((int8_t)rssi);
+    s_pushed_samples.fetch_add(1, std::memory_order_relaxed);
   }
 };
 ScanCB s_scan_cb;
@@ -192,26 +218,33 @@ void update_state_machine() {
       break;
 
     case State::APPROACHING:
-      // Dwell wins over release: once we've held APPROACHING for the
-      // configured window, promote to IN_PROXIMITY. Only fall back to
-      // OUT_OF_RANGE on FRESH evidence (a real sample below release
-      // threshold), not on staleness — sparse samples are normal here.
-      // Absolute-stale forces a fall-back even without a fresh sample.
+      // Promotion to IN_PROXIMITY requires BOTH the dwell window to have
+      // elapsed AND a fresh sample still meeting threshold. Without the
+      // fresh+strong gate, a single transient sample at boot would tip
+      // OUT_OF_RANGE -> APPROACHING and then dwell alone would latch us
+      // into IN_PROXIMITY even though the peer was never really there.
+      // Demote on a fresh below-release sample (real signal, peer moved
+      // away) or on absolute staleness (peer vanished silently).
       if (absolute_stale) {
         transition(State::OUT_OF_RANGE, now_ms);
-      } else if ((now_ms - s_state_started_ms) >= PROXIMITY_DWELL_SECONDS * 1000UL) {
-        transition(State::IN_PROXIMITY, now_ms);
       } else if (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD) {
         transition(State::OUT_OF_RANGE, now_ms);
+      } else if (fresh && s_smoothed_rssi >= PROXIMITY_RSSI_THRESHOLD &&
+                 (now_ms - s_state_started_ms) >= PROXIMITY_DWELL_SECONDS * 1000UL) {
+        transition(State::IN_PROXIMITY, now_ms);
       }
       break;
 
     case State::IN_PROXIMITY:
-      // Same idea: only fall back to LEAVING on a fresh sample below
-      // release. If we just lost samples, hold IN_PROXIMITY — UNLESS
-      // we've been completely silent for ABSOLUTE_STALE_MS, in which
-      // case the peer has really gone.
-      if (absolute_stale || (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD)) {
+      // Only fall back to LEAVING on a fresh sample below release
+      // (peer actually moved away) or after IN_PROXIMITY_STALE_MS of
+      // no samples at all (peer truly vanished). The longer stale
+      // window vs APPROACHING is intentional: scan-starvation droughts
+      // during IN_PROXIMITY were causing spurious LEAVING -> back-to-
+      // IN_PROXIMITY flickers, each firing a /api/proximity/lost POST
+      // that the companion immediately had to undo.
+      if ((stale_ms > IN_PROXIMITY_STALE_MS) ||
+          (fresh && s_smoothed_rssi < RELEASE_RSSI_THRESHOLD)) {
         transition(State::LEAVING, now_ms);
       }
       break;
@@ -251,6 +284,48 @@ void start_advertising() {
   adv->start();
 }
 
+// ---- Periodic stats log --------------------------------------------------
+// Emit one line every 5 s with state, smoothed RSSI, and the three counters
+// (atomically read + zeroed). Three numbers tell you exactly where a missing
+// detection is breaking down:
+//   adverts=0       -> BLE scan isn't running at all
+//   adverts>0,
+//   matches=0       -> scan is alive but peer MAC isn't in range / paired
+//                      address is wrong
+//   matches>0,
+//   pushed=0        -> peer is being seen but every reading is the 127
+//                      "not available" sentinel (stack/coexistence quirk)
+//   pushed>0        -> samples reaching the ring; state machine is in charge
+constexpr uint32_t PROX_STATS_INTERVAL_MS = 5000;
+
+void emit_stats_line() {
+  const uint32_t adv     = s_adverts_seen.exchange(0, std::memory_order_relaxed);
+  const uint32_t matches = s_peer_matches.exchange(0, std::memory_order_relaxed);
+  const uint32_t pushed  = s_pushed_samples.exchange(0, std::memory_order_relaxed);
+  uint8_t ring_count;
+  portENTER_CRITICAL(&s_ring_mux);
+  ring_count = s_ring_count;
+  portEXIT_CRITICAL(&s_ring_mux);
+  LOG_I(TAG, "stats state=%s smoothed=%d ring=%u adv=%lu match=%lu push=%lu",
+        state_str(s_state), (int)s_smoothed_rssi, (unsigned)ring_count,
+        (unsigned long)adv, (unsigned long)matches, (unsigned long)pushed);
+
+  // Self-heal the BLE scan. WiFi+BLE coexistence on the ESP32-S3 doesn't
+  // just preempt scan on hard events (WiFi reconnect, captive portal) —
+  // it also progressively starves it under sustained WiFi load (HA
+  // WebSocket churn, weak-signal retransmits). On the bench, a healthy
+  // scan window shows ~30 adverts; a starved one shows 1-4 (controller
+  // dribble, not real reception). So treat any window under MIN_HEALTHY
+  // as broken and kick start() again. Cheap (one HCI command);
+  // idempotent if the scan is actually running. The next window's
+  // counter tells us whether the re-arm worked.
+  constexpr uint32_t MIN_HEALTHY_ADV_PER_WINDOW = 10;
+  if (s_has_peer && adv < MIN_HEALTHY_ADV_PER_WINDOW) {
+    LOG_W(TAG, "scan starved (adv=%lu in 5s) — re-arming", (unsigned long)adv);
+    start_scan();
+  }
+}
+
 // ---- Task body -----------------------------------------------------------
 void proximity_task(void*) {
   esp_task_wdt_add(NULL);
@@ -258,9 +333,15 @@ void proximity_task(void*) {
   start_advertising();
   if (s_has_peer) start_scan();
 
+  uint32_t last_stats_ms = millis();
   for (;;) {
     esp_task_wdt_reset();
     update_state_machine();
+    const uint32_t now = millis();
+    if ((now - last_stats_ms) >= PROX_STATS_INTERVAL_MS) {
+      emit_stats_line();
+      last_stats_ms = now;
+    }
     vTaskDelay(pdMS_TO_TICKS(250));
   }
 }

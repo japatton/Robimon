@@ -124,6 +124,19 @@ void draw_caption_overlay() {
   ::robimon::hal::display::flush_band(CAPTION_BAND_Y, CAPTION_BAND_H);
 }
 
+// Wipe + push a clean black canvas to the panel. Used by every screen-stack
+// transition (carousel swap, modal push, modal pop): without this explicit
+// flush, the face's per-frame partial-band push (y 46..300) leaves the
+// caption band (y 0..45) and dot-band gap rows (y 300..320) showing
+// whatever the previous screen / modal drew there.
+void wipe_and_flush() {
+  Arduino_GFX* g = ::robimon::hal::display::gfx();
+  if (g) {
+    g->fillScreen(COLOR_BG);
+    ::robimon::hal::display::flush();
+  }
+}
+
 }  // namespace
 
 void begin() {
@@ -158,15 +171,7 @@ void set_index(int idx) {
   // flushes its middle band y 46..300) — without this, anything the
   // previous screen drew at the top or bottom of the canvas survives
   // the swap on the panel even though the canvas itself is clean.
-  // Push the fillScreen result with a full display::flush() so the
-  // panel starts the new screen with a known-black state; subsequent
-  // partial flushes from the new screen + overlays then write only
-  // what they own.
-  Arduino_GFX* g = ::robimon::hal::display::gfx();
-  if (g) {
-    g->fillScreen(COLOR_BG);
-    ::robimon::hal::display::flush();
-  }
+  wipe_and_flush();
 
   s_current = idx;
   s_initial_appear_done = true;
@@ -193,6 +198,11 @@ void push_modal(Screen* s) {
   Screen* below = active();
   if (below) below->on_disappear();
   s_modals[s_modal_count++] = s;
+  // Clear before the modal renders — modals usually don't repaint the
+  // entire canvas (they're often a small dialog), so without a wipe the
+  // underlying screen's pixels remain visible around the modal's
+  // bounding box.
+  wipe_and_flush();
   s->on_appear();
   LOG_I(TAG, "modal+ %s (depth=%d)", s->name(), s_modal_count);
 }
@@ -201,6 +211,10 @@ void pop_modal() {
   if (s_modal_count == 0) return;
   Screen* top = s_modals[--s_modal_count];
   if (top) top->on_disappear();
+  // Clear before the underlying screen / modal-below redraws — the popped
+  // modal's pixels would otherwise persist anywhere the new active screen
+  // doesn't fully overdraw.
+  wipe_and_flush();
   Screen* now_active = active();
   if (now_active) now_active->on_appear();
   LOG_I(TAG, "modal- %s (depth=%d)", top ? top->name() : "?", s_modal_count);

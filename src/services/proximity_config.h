@@ -73,11 +73,20 @@ constexpr uint16_t BLE_ADV_INTERVAL_MS         = 200;
 constexpr uint32_t SAMPLE_STALE_MS = 3000;
 
 // Absolute watchdog — even with the "fresh sample required to demote"
-// policy, force-demote APPROACHING/IN_PROXIMITY back toward OUT_OF_RANGE
-// after this long with no samples at all. Without this, a peer that
-// vanishes silently (powered off, walked away in a Wi-Fi-noise gap)
-// latches us into IN_PROXIMITY forever.
+// policy, force-demote APPROACHING back toward OUT_OF_RANGE after this
+// long with no samples at all. Without this, a peer that vanishes
+// silently latches us into APPROACHING forever.
 constexpr uint32_t ABSOLUTE_STALE_MS = 12000;
+
+// Same idea but longer for IN_PROXIMITY -> LEAVING. Once we're already
+// IN_PROXIMITY we know the peer was definitely close; sample droughts
+// here are usually transient (BLE+WiFi coex storms during HA WS
+// reconnects, weak-WiFi retransmit bursts) rather than the peer
+// actually leaving. The scan auto-rearm cycle recovers within ~10 s,
+// so 30 s gives 2-3 chances to catch a fresh sample before
+// firing the spurious LEAVING -> /api/proximity/lost POST that the
+// companion would then have to undo.
+constexpr uint32_t IN_PROXIMITY_STALE_MS = 30000;
 
 // ---- Conversation session safety ------------------------------------------
 // If no new /play arrives within this many seconds after we ack a
