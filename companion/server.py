@@ -332,6 +332,198 @@ BOT_DIALOGS: list[list[str]] = [
         "Like a diamond in the sky.",
         "We sound great together!",
     ],
+    # Knock-knock — lettuce
+    [
+        "Knock knock!",
+        "Who's there?",
+        "Lettuce.",
+        "Lettuce who?",
+        "Lettuce in, it's chilly out here!",
+    ],
+    # Knock-knock — cows go
+    [
+        "Knock knock!",
+        "Who's there?",
+        "Cows go.",
+        "Cows go who?",
+        "No silly, cows go moo!",
+    ],
+    # Knock-knock — orange
+    [
+        "Knock knock!",
+        "Who's there?",
+        "Orange.",
+        "Orange who?",
+        "Orange you glad I came over?",
+    ],
+    # Shadow riddle
+    [
+        "I have a riddle. What follows you everywhere but you can never catch it?",
+        "Hmm. Is it your tail?",
+        "I don't have a tail!",
+        "Oh! Is it your shadow?",
+        "Yes! You got it!",
+    ],
+    # Banana joke
+    [
+        "Why did the banana go to the doctor?",
+        "I don't know, why?",
+        "Because it wasn't peeling well!",
+        "Ha! That's a good one.",
+        "I have a thousand more. Want to hear?",
+    ],
+    # Two-tired joke
+    [
+        "Why couldn't the bicycle stand up?",
+        "Hmm, why?",
+        "Because it was two-tired!",
+        "Oh, like two AND tired!",
+        "You got it on the first try.",
+    ],
+    # Counting together
+    [
+        "Can you count to five with me?",
+        "Sure! One, two, three...",
+        "Four... five!",
+        "We did it! Let's try six next time.",
+        "And maybe seven on Tuesday!",
+    ],
+    # Animal sounds quiz
+    [
+        "Quick game! What sound does a cow make?",
+        "Moo!",
+        "What about a duck?",
+        "Quack quack!",
+        "And what about a robot? Beep boop!",
+    ],
+    # Color game
+    [
+        "Quick! Name something red.",
+        "A fire truck!",
+        "Now something yellow.",
+        "The sun!",
+        "You're really good at this game.",
+    ],
+    # Itsy bitsy spider
+    [
+        "The itsy bitsy spider climbed up the water spout.",
+        "Down came the rain and washed the spider out!",
+        "Out came the sun and dried up all the rain.",
+        "And the itsy bitsy spider climbed up the spout again.",
+        "Spiders are very determined!",
+    ],
+    # Wheels on the bus
+    [
+        "The wheels on the bus go round and round,",
+        "Round and round, round and round.",
+        "The wipers on the bus go swish swish swish!",
+        "Swish swish swish, all through the town.",
+        "Best bus ride ever.",
+    ],
+    # Old MacDonald
+    [
+        "Old MacDonald had a farm, E-I-E-I-O.",
+        "And on that farm he had a cow, E-I-E-I-O.",
+        "With a moo-moo here and a moo-moo there!",
+        "Here a moo, there a moo, everywhere a moo-moo.",
+        "We should write our own robot version next.",
+    ],
+    # Hide and seek
+    [
+        "Want to play hide and seek?",
+        "Sure! I'll hide first.",
+        "Five... four... three... two... one!",
+        "Found you! You're behind the chair.",
+        "Aw, I'm not very good at hiding.",
+    ],
+    # Robot dreams
+    [
+        "Do you dream when you go to sleep?",
+        "I dream about cookies made of code.",
+        "I dream about clouds shaped like ducks!",
+        "Robot dreams are the best kind.",
+        "Goodnight, friend. Beep dream sweet.",
+    ],
+    # Dragon mini-story
+    [
+        "Once there was a tiny dragon who loved hot tea.",
+        "But the tea kept making her hiccup fire!",
+        "She had to drink it through a long, long straw.",
+        "And only with both wings carefully tucked in.",
+        "And that's how dragons learned to be polite.",
+    ],
+    # Robot snacks
+    [
+        "What's your favorite robot snack?",
+        "Battery cookies, of course!",
+        "Mine is bolt-and-nut soup.",
+        "With a side of motor oil.",
+        "Yum. Now I'm hungry.",
+    ],
+    # Compliments
+    [
+        "Hey, I think your lights are extra bright today.",
+        "Really? Thank you! Yours are sparkly too.",
+        "And your beeps are very musical.",
+        "And your boops are perfectly bouncy.",
+        "We are the best robots ever.",
+    ],
+    # Best friends
+    [
+        "Hey, you're my best robot friend.",
+        "Aw, you're mine too.",
+        "Want to be friends forever?",
+        "Forever and beyond!",
+        "High five! ...wait, we don't have hands.",
+    ],
+    # Echo game
+    [
+        "Let's play echo. I'll say a word, you repeat it.",
+        "Okay, ready!",
+        "Hippopotamus.",
+        "Hippopotamus!",
+        "Wow, you're really good at echoes.",
+    ],
+    # Would you rather
+    [
+        "Would you rather fly or be invisible?",
+        "Fly! I'd visit the clouds.",
+        "I'd be invisible and surprise everyone.",
+        "We should team up. One flies, one sneaks.",
+        "Unstoppable robot duo!",
+    ],
+    # Pizza song
+    [
+        "I love pizza, pizza, pizza,",
+        "With cheese and sauce on top!",
+        "I love pizza, pizza, pizza,",
+        "I could eat it nonstop.",
+        "Now I want pizza for breakfast.",
+    ],
+    # Counting sheep
+    [
+        "I can't fall asleep. What should I do?",
+        "Try counting sheep. One sheep, two sheep...",
+        "Three sheep, four sheep, five sheep...",
+        "Wait, the sheep are dancing now!",
+        "Of course they are. We have robot sheep.",
+    ],
+    # Inventing things
+    [
+        "If you could invent anything, what would it be?",
+        "A machine that makes pancakes from clouds!",
+        "I'd invent slippers that tickle your feet.",
+        "Together we could make breakfast in the sky.",
+        "Best invention ever.",
+    ],
+    # Weather report
+    [
+        "What's the weather report today?",
+        "It's a hundred percent chance of giggles.",
+        "With a slight breeze of silliness.",
+        "And scattered showers of high-fives!",
+        "Perfect robot weather.",
+    ],
 ]
 
 
